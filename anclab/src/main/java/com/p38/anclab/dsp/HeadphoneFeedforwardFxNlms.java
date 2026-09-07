@@ -6,17 +6,22 @@ import java.util.Arrays;
  * Predictive 128-tap headphone FxNLMS controller for a phone-mounted reference mic.
  *
  * Normal IEM use has no in-ear error microphone, so the phone microphone is treated
- * strictly as a reference. The calibrated bulk output delay becomes a prediction
- * horizon H. A direct-horizon adaptive linear predictor learns x[n] from x[n-H...]
- * and is then applied to the current reference history to estimate x[n+H].
+ * strictly as a reference. The calibrated bulk output delay becomes the main prediction
+ * horizon. A direct-horizon adaptive linear predictor learns x[n] from x[n-H...]
+ * and is then applied to the current reference history to estimate the future disturbance.
  *
- * The predicted future disturbance drives a 128-tap FxNLMS inverse of the measured
- * 128-tap headphone secondary-path FIR. The bulk route delay is NOT applied again
- * inside the FxNLMS path because it is already absorbed by the prediction horizon.
+ * The predicted disturbance drives a 128-tap controller derived from the measured
+ * 128-tap headphone secondary path. The controller is seeded with a conservative,
+ * regularised matched inverse of the measured path rather than starting from zero.
+ * This is important for real calibrations whose secondary-path coefficients are very small:
+ * zero-start FxNLMS can otherwise take effectively forever to build enough inverse gain.
+ *
+ * The inverse seed has an intrinsic delay of secondary.length - 1 samples, so that delay
+ * is added to the measured bulk route delay when choosing the prediction horizon. FxNLMS
+ * then performs only a slow bounded refinement of the seeded inverse.
  *
  * Prediction confidence is derived from normalized prediction error. Unpredictable
- * broadband content is smoothly suppressed rather than converted into arbitrary
- * anti-noise.
+ * broadband content is smoothly suppressed rather than converted into arbitrary anti-noise.
  */
 public final class HeadphoneFeedforwardFxNlms {
     public static final int CONTROLLER_TAPS = 128;
@@ -24,8 +29,11 @@ public final class HeadphoneFeedforwardFxNlms {
 
     private static final int PREDICTOR_ADAPT_DECIMATION = 4;
     private static final float EPS = 1e-8f;
+    private static final float INVERSE_REGULARISATION = 4.0f;
+    private static final float CONTROLLER_WEIGHT_LIMIT = 64.0f;
 
     private final int horizonSamples;
+    private final int inverseDelaySamples;
     private final float[] secondary;
 
     // Direct-horizon predictor.
@@ -55,7 +63,9 @@ public final class HeadphoneFeedforwardFxNlms {
     private int pathPos = 0;
 
     private float controllerMu = 0.035f;
-    private float controllerLeakage = 0.00002f;
+    // The old value (2e-5/sample) erased a calibrated inverse in a few seconds.
+    // With no physical in-ear error mic, retain the measured model and refine slowly.
+    private float controllerLeakage = 0.00000001f;
     private float outputCeiling;
 
     private float dcX1 = 0f;
@@ -70,19 +80,48 @@ public final class HeadphoneFeedforwardFxNlms {
     private volatile float lastPredictedResidual = 0f;
 
     public HeadphoneFeedforwardFxNlms(float[] secondaryPath, int bulkDelaySamples, float ceiling) {
-        horizonSamples = Math.max(1, bulkDelaySamples);
         secondary = secondaryPath == null || secondaryPath.length == 0
                 ? new float[]{1f}
                 : Arrays.copyOf(secondaryPath, secondaryPath.length);
+
+        // A reversed-path matched inverse produces its main cancellation lobe after
+        // secondary.length - 1 samples. Predict through that small extra controller delay too.
+        inverseDelaySamples = Math.max(0, secondary.length - 1);
+        horizonSamples = Math.max(1, bulkDelaySamples + inverseDelaySamples);
 
         referenceHistory = new float[horizonSamples + PREDICTOR_TAPS + 32];
         int pathHistory = Math.max(512, secondary.length + 32);
         driveHistory = new float[pathHistory];
         predictorPathHistory = new float[pathHistory];
         outputCeiling = clamp(Math.abs(ceiling), 0.02f, 0.5f);
+
+        seedControllerFromSecondaryPath();
     }
 
-    /** Existing AudioEngine API: controls the cancellation FxNLMS step size. */
+    /**
+     * Conservative regularised matched inverse:
+     *     W[k] = -reverse(S)[k] / ((1 + lambda) * ||S||^2)
+     *
+     * This is deliberately less aggressive than an exact deconvolution. It gives the
+     * controller meaningful calibrated gain immediately while the output ceiling and
+     * prediction-confidence gate remain the final safety bounds.
+     */
+    private void seedControllerFromSecondaryPath() {
+        float energy = 0f;
+        for (float h : secondary) energy += h * h;
+        if (energy < 1e-12f) return;
+
+        float denominator = energy * (1f + INVERSE_REGULARISATION) + 1e-12f;
+        Arrays.fill(controllerWeights, 0f);
+        int n = Math.min(CONTROLLER_TAPS, secondary.length);
+        for (int k = 0; k < n; k++) {
+            int hi = secondary.length - 1 - k;
+            controllerWeights[k] = clamp(-secondary[hi] / denominator,
+                    -CONTROLLER_WEIGHT_LIMIT, CONTROLLER_WEIGHT_LIMIT);
+        }
+    }
+
+    /** Existing AudioEngine API: controls the slow cancellation FxNLMS refinement rate. */
     public void setAdaptationRate(float v) {
         controllerMu = clamp(v, 0f, 0.15f);
     }
@@ -121,7 +160,7 @@ public final class HeadphoneFeedforwardFxNlms {
         confidenceSmooth = 0.998f * confidenceSmooth + 0.002f * confidence;
 
         // Below ~5% measured predictive skill, keep the headphone drive near zero.
-        // By ~45% skill, allow the full safe calibrated ceiling.
+        // By ~45% skill, allow the full calibrated controller response.
         float outputGate = smoothstep(0.05f, 0.45f, confidenceSmooth);
 
         predictedHistory[predictedPos] = predictedFuture;
@@ -138,7 +177,9 @@ public final class HeadphoneFeedforwardFxNlms {
         float xf = convolveSecondary(predictorPathHistory, pathPos);
         filteredPredictedHistory[filteredPos] = xf;
 
-        // Adapt only where the predictor has demonstrated useful skill.
+        // Slow bounded model refinement. The fixed floor is retained deliberately here:
+        // the calibrated inverse supplies the required bulk gain, while this update should
+        // not explode merely because a quiet reference produces a tiny filtered-X vector.
         float adaptGate = smoothstep(0.02f, 0.30f, confidenceSmooth);
         if (adaptGate > 0f) {
             float norm = 1e-5f;
@@ -147,12 +188,11 @@ public final class HeadphoneFeedforwardFxNlms {
             for (int k = 0; k < CONTROLLER_TAPS; k++) {
                 int idx = filteredPos - k;
                 if (idx < 0) idx += CONTROLLER_TAPS;
-                controllerWeights[k] = (1f - controllerLeakage) * controllerWeights[k]
-                        - step * filteredPredictedHistory[idx];
-            }
-        } else {
-            for (int k = 0; k < CONTROLLER_TAPS; k++) {
-                controllerWeights[k] *= (1f - controllerLeakage);
+                controllerWeights[k] = clamp(
+                        (1f - controllerLeakage) * controllerWeights[k]
+                                - step * filteredPredictedHistory[idx],
+                        -CONTROLLER_WEIGHT_LIMIT,
+                        CONTROLLER_WEIGHT_LIMIT);
             }
         }
 
@@ -206,6 +246,7 @@ public final class HeadphoneFeedforwardFxNlms {
     public float outputRms() { return (float)Math.sqrt(Math.max(0f, outRms)); }
     public float predictorConfidence() { return confidenceSmooth; }
     public int predictionHorizonSamples() { return horizonSamples; }
+    public int inverseDelaySamples() { return inverseDelaySamples; }
 
     public float diagnosticReference() { return lastReference; }
     public float diagnosticPredictedFuture() { return lastPredictedFuture; }
