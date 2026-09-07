@@ -6,5 +6,10 @@ data class AcousticState(
     val detectedFrequencyHz: Float = 0f,
     val amplitudePercentage: Float = AudioConstants.DEFAULT_AMPLITUDE_PERCENT,
     val phaseDegrees: Float = AudioConstants.DEFAULT_PHASE_DEGREES,
-    val isEmitting: Boolean = false
+    val isEmitting: Boolean = false,
+    val calibrationStatus: CalibrationStatus = CalibrationStatus.REQUIRED,
+    val calibrationProfile: CalibrationProfile? = null,
+    val calibrationMessage: String = "Calibration required",
+    val diagnostics: EngineDiagnostics = EngineDiagnostics(),
+    val startupComplete: Boolean = false
 )
