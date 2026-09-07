@@ -27,6 +27,7 @@ import android.widget.TextView;
 import android.widget.Toast;
 
 import com.p38.anclab.audio.AudioEngine;
+import com.p38.anclab.dsp.VehicleLaneRegistry;
 import com.p38.anclab.profile.HeadphoneCalibration;
 import com.p38.anclab.profile.ProfileStore;
 import com.p38.anclab.recording.AppLog;
@@ -47,7 +48,7 @@ public final class MainActivity extends Activity {
     private ProfileStore profiles;
     private ScrollView controlPage,splPage,settingsPage;
     private Button controlTab,splTab,settingsTab,startButton,recordButton,calibrateButton,useStoredButton,graphButton;
-    private TextView storageText,calibrationText,runtimeText,profileWarning,recordingText,antiNoiseText,broadbandText;
+    private TextView storageText,calibrationText,runtimeText,profileWarning,recordingText,antiNoiseText,broadbandText,laneCountText,laneListText;
     private Spinner profileSpinner,inputSpinner,outputSpinner,settingsInputSpinner,settingsOutputSpinner;
     private CheckBox positionCheck,monitorLogCheck,broadbandCheck;
     private SeekBar antiNoiseSeek;
@@ -81,7 +82,11 @@ public final class MainActivity extends Activity {
 
         root.addView(section("ANC CONTROL"));LinearLayout control=card(CARD,Color.TRANSPARENT);profileWarning=text("",12,AMBER);control.addView(profileWarning);broadbandCheck=check("SPECULATIVE BROADBAND ANC",false);control.addView(broadbandCheck,topSpaced());broadbandText=text("",11,MUTED);control.addView(broadbandText,topSpaced());startButton=primaryButton("START ANC");startButton.setOnClickListener(v->toggleAnc());control.addView(startButton,topSpaced());graphButton=secondaryButton("OPEN LIVE WAVE GRAPH");graphButton.setOnClickListener(v->startActivity(new Intent(this,GraphActivity.class)));control.addView(graphButton,topSpaced());root.addView(control,spaced());
 
-        root.addView(section("LIVE SESSION"));LinearLayout live=card(CARD_ALT,Color.rgb(42,62,79));runtimeText=text("Stopped · output muted",14,GREEN);runtimeText.setTypeface(Typeface.DEFAULT,Typeface.BOLD);live.addView(runtimeText);live.addView(text("Vehicle narrowband orders now move from live GPS/OBD speed and RPM. The selected cabin microphone searches around each predicted order, fine-tunes it, and saves a bounded correction for later runs. Predictable tones remain excluded from speculative broadband.",11,MUTED),topSpaced());root.addView(live,spaced());
+        root.addView(section("LIVE SESSION"));LinearLayout live=card(CARD_ALT,Color.rgb(42,62,79));
+        runtimeText=text("Stopped · output muted",14,GREEN);runtimeText.setTypeface(Typeface.DEFAULT,Typeface.BOLD);live.addView(runtimeText);
+        laneCountText=text("0 lanes monitored · 0 actively cancelling",14,GREEN);laneCountText.setTypeface(Typeface.DEFAULT,Typeface.BOLD);live.addView(laneCountText,topSpaced());
+        laneListText=text("Cancellation lanes: —",12,TEXT);live.addView(laneListText,topSpaced());
+        live.addView(text("With telemetry, known mechanical orders are tracked and fine-tuned from the microphone. Without usable telemetry, stable 8–200 Hz lines are discovered automatically and get the same measured narrowband cancellation/verification path.",11,MUTED),topSpaced());root.addView(live,spaced());
 
         profileSpinner.setOnItemSelectedListener(new SimpleItemListener(position->{String next=position==2?ProfileStore.PROFILE_HEADPHONES:position==1?ProfileStore.PROFILE_E46:ProfileStore.PROFILE_P38;if(!next.equals(currentProfile)&&rt.audio.isRunning())stopAnc();currentProfile=next;profiles.saveCurrentProfile(currentProfile);loadProfileState();}));
         refresh.setOnClickListener(v->refreshDevices());
@@ -92,7 +97,7 @@ public final class MainActivity extends Activity {
 
     private ScrollView buildSplPage(){
         ScrollView scroll=new ScrollView(this);LinearLayout root=column();root.setPadding(dp(16),dp(10),dp(16),dp(30));scroll.addView(root,matchWrap());
-        LinearLayout meter=card(Color.rgb(13,33,37),Color.rgb(30,89,94));meter.addView(text("LIVE MICROPHONE LEVEL",13,MUTED));meter.addView(text("Reference/error RMS is shown in the live status. Vehicle ANC uses this same selected microphone both to verify narrowband cancellation and to learn small corrections to telemetry-predicted mechanical orders.",12,TEXT),topSpaced());root.addView(meter,spaced());
+        LinearLayout meter=card(Color.rgb(13,33,37),Color.rgb(30,89,94));meter.addView(text("LIVE MICROPHONE LEVEL",13,MUTED));meter.addView(text("Reference/error RMS is shown in the live status. Vehicle ANC uses this same selected microphone to verify narrowband cancellation and to learn small corrections to telemetry-predicted mechanical orders.",12,TEXT),topSpaced());root.addView(meter,spaced());
         root.addView(section("WAV + SESSION LOG"));LinearLayout recording=card(CARD,Color.TRANSPARENT);recordingText=text("Not recording",14,TEXT);recording.addView(recordingText);recordButton=primaryButton("START WAV + CSV LOG");recordButton.setOnClickListener(v->toggleRecording());recording.addView(recordButton,topSpaced());recording.addView(text("Stereo diagnostic WAV: raw selected microphone + actual cancellation samples sent to the output route.",11,MUTED),topSpaced());root.addView(recording,spaced());
         root.addView(section("BACKGROUND MONITOR LOG"));LinearLayout monitor=card(CARD,Color.TRANSPARENT);monitorLogCheck=check("BACKGROUND MONITOR LOG",true);monitorLogCheck.setOnCheckedChangeListener((b,c)->rt.audio.setMonitorLogEnabled(c));monitor.addView(monitorLogCheck);monitor.addView(text("Continues with the foreground ANC service while the UI is backgrounded.",11,MUTED),topSpaced());root.addView(monitor,spaced());return scroll;
     }
@@ -102,7 +107,8 @@ public final class MainActivity extends Activity {
         root.addView(section("USER DATA"));LinearLayout storage=card(CARD,Color.TRANSPARENT);storageText=text("Storage not connected",13,MUTED);storage.addView(storageText);Button sb=secondaryButton("CONNECT / RESELECT  Documents/ANC");sb.setOnClickListener(v->startActivityForResult(rt.storage.createTreePickerIntent(),REQ_TREE));storage.addView(sb,topSpaced());storage.addView(text("Profiles, route calibration, settings, telemetry learning, logs and WAVs stay under Internal storage/Documents/ANC.",11,MUTED),topSpaced());root.addView(storage,spaced());
         root.addView(section("AUDIO ROUTES"));LinearLayout routes=card(CARD,Color.TRANSPARENT);routes.addView(text("Input microphone",13,MUTED));settingsInputSpinner=new Spinner(this);routes.addView(settingsInputSpinner,matchWrap());routes.addView(text("Cancellation output",13,MUTED),topSpaced());settingsOutputSpinner=new Spinner(this);routes.addView(settingsOutputSpinner,matchWrap());Button rr=secondaryButton("REFRESH INPUTS + OUTPUTS");rr.setOnClickListener(v->refreshDevices());routes.addView(rr,topSpaced());root.addView(routes,spaced());
         root.addView(section("ROUTE CALIBRATION"));LinearLayout bench=card(CARD,Color.TRANSPARENT);positionCheck=check("I have positioned the microphone/output safely for a low-level route probe",false);bench.addView(positionCheck);calibrationText=text("No stored calibration",13,MUTED);bench.addView(calibrationText,topSpaced());calibrateButton=secondaryButton("RUN / RE-RUN ROUTE CALIBRATION");calibrateButton.setOnClickListener(v->runCalibration());bench.addView(calibrateButton,topSpaced());useStoredButton=secondaryButton("USE STORED CALIBRATION");useStoredButton.setOnClickListener(v->loadSavedCalibration());bench.addView(useStoredButton,topSpaced());bench.addView(text("Headphones: place the IEMs beside the phone microphone only for calibration. Vehicle: selected cabin microphone should be at the listening position and the selected car audio output active. Calibration also records the current Android media-volume gain for later ANC volume compensation.",11,MUTED),topSpaced());root.addView(bench,spaced());
-        root.addView(section("VEHICLE TELEMETRY"));LinearLayout telem=card(CARD,Color.TRANSPARENT);telem.addView(text("Vehicle mode requests GPS speed and automatically tries a paired Bluetooth device whose name resembles OBD / ELM / Vgate / VLink / Veepeak. OBD speed is preferred to GPS when available; real OBD RPM supersedes the P38 highway RPM estimate. Learned microphone corrections are saved per profile.",12,TEXT));root.addView(telem,spaced());
+        root.addView(section("VEHICLE TELEMETRY"));LinearLayout telem=card(CARD,Color.TRANSPARENT);telem.addView(text("Vehicle mode requests GPS speed and automatically tries a paired Bluetooth device whose name resembles OBD / ELM / Vgate / VLink / Veepeak. OBD speed is preferred to GPS when available; real OBD RPM supersedes the P38 highway RPM estimate. If telemetry is absent, automatic narrow-line discovery takes over.",12,TEXT));root.addView(telem,spaced());
+        root.addView(section("ANDROID AUTO + MEDIA CONTROLS"));LinearLayout aa=card(CARD,Color.TRANSPARENT);aa.addView(text("The MediaBrowser/MediaSession surface is enabled again for Android Auto and Android's media drawer. Play resumes a prepared calibrated route, pause/stop mutes ANC, Record toggles diagnostics, and vehicle mode exposes the experimental broadband toggle. ANC still does not request audio focus.",12,TEXT));root.addView(aa,spaced());
         root.addView(section("BACKGROUND OPERATION"));LinearLayout bg=card(CARD,Color.TRANSPARENT);bg.addView(text("ANC runs as a microphone + media-playback foreground service without requesting audio focus. Headphone mode also watches the routed output continuously and stops ANC if the headphones disconnect or Android reroutes to another device.",12,TEXT));root.addView(bg,spaced());return scroll;
     }
 
@@ -117,9 +123,11 @@ public final class MainActivity extends Activity {
 
     private void updateProfileUi(){
         boolean h=isHeadphones();
-        if(broadbandCheck!=null){broadbandCheck.setVisibility(h?View.GONE:View.VISIBLE);}
-        if(broadbandText!=null){broadbandText.setVisibility(h?View.GONE:View.VISIBLE);if(!h)broadbandText.setText("Optional 15–600 Hz measured-error feedback FxNLMS. The live GPS/OBD narrowband frequencies are dynamically notched out before this controller. Toggle can be changed while vehicle ANC is running.");}
-        if(profileWarning!=null){if(h){profileWarning.setText("HEADPHONES · predictive 15–600 Hz feed-forward FxNLMS · disconnect protection active");profileWarning.setTextColor(CYAN);}else{profileWarning.setText((ProfileStore.PROFILE_E46.equals(currentProfile)?"E46":"P38")+" · telemetry-tracked mechanical orders + microphone fine-tuning. GPS/OBD/RPM status appears below while running.");profileWarning.setTextColor(AMBER);}}
+        if(broadbandCheck!=null)broadbandCheck.setVisibility(h?View.GONE:View.VISIBLE);
+        if(laneCountText!=null)laneCountText.setVisibility(h?View.GONE:View.VISIBLE);
+        if(laneListText!=null)laneListText.setVisibility(h?View.GONE:View.VISIBLE);
+        if(broadbandText!=null){broadbandText.setVisibility(h?View.GONE:View.VISIBLE);if(!h)broadbandText.setText("Experimental residual 15–600 Hz feedback FxNLMS. It is limited to 25% of the selected ANC allowance, dynamically excludes active narrow lanes, and now latches off if its output becomes ceiling-pinned.");}
+        if(profileWarning!=null){if(h){profileWarning.setText("HEADPHONES · predictive 15–600 Hz feed-forward FxNLMS · disconnect protection active");profileWarning.setTextColor(CYAN);}else{profileWarning.setText((ProfileStore.PROFILE_E46.equals(currentProfile)?"E46":"P38")+" · telemetry-tracked orders when available; automatic stable-line discovery otherwise.");profileWarning.setTextColor(AMBER);}}
         if(startButton!=null)startButton.setText(rt.audio.isRunning()?"STOP ANC":h?"START HEADPHONE ANC":"START VEHICLE ANC");
         if(graphButton!=null)graphButton.setEnabled(true);
         if(positionCheck!=null){positionCheck.setChecked(false);positionCheck.setText(h?"Calibration only: IEMs are beside the phone microphone and are not being worn":"Vehicle is stationary/safe and the selected microphone/output are positioned for a low-level route probe");}
@@ -157,12 +165,16 @@ public final class MainActivity extends Activity {
         boolean ok=isHeadphones()?rt.audio.startHeadphoneAnc():rt.audio.startVehicleAnc(currentProfile,broadbandCheck!=null&&broadbandCheck.isChecked(),profiles.loadMechanicalFrequencies(currentProfile));
         if(ok){Intent s=new Intent(this,AncMediaService.class);if(Build.VERSION.SDK_INT>=26)startForegroundService(s);else startService(s);updateProfileUi();}else toast("Could not start: "+rt.audio.getLastError());
     }
-    private void stopAnc(){rt.audio.stop();stopService(new Intent(this,AncMediaService.class));if(recordButton!=null)recordButton.setText("START WAV + CSV LOG");if(recordingText!=null)recordingText.setText("Not recording");updateProfileUi();}
+    private void stopAnc(){rt.audio.stop();VehicleLaneRegistry.clear();stopService(new Intent(this,AncMediaService.class));if(recordButton!=null)recordButton.setText("START WAV + CSV LOG");if(recordingText!=null)recordingText.setText("Not recording");updateProfileUi();}
 
     private void toggleRecording(){if(!rt.audio.isRunning()){toast("Start ANC before recording");showPage(0);return;}if(rt.audio.isRecording()){rt.audio.stopRecording();recordButton.setText("START WAV + CSV LOG");recordingText.setText("Saved to Documents/ANC");toast("WAV and CSV copied to Documents/ANC");}else if(rt.audio.startRecording()){recordButton.setText("STOP WAV + CSV LOG");recordingText.setText("Recording raw microphone + actual cancellation output…");}}
 
     private String profileName(){return isHeadphones()?"Headphones":ProfileStore.PROFILE_E46.equals(currentProfile)?"E46":"P38";}
-    private final Runnable statusTick=new Runnable(){@Override public void run(){if(runtimeText!=null){String safety=rt.audio.getSafetyStatus();runtimeText.setText(String.format(Locale.US,"%s · %s · mic %.5f RMS · drive %.5f RMS · limit %d%%%s",rt.audio.isRunning()?"RUNNING":"STOPPED",profileName(),rt.audio.getInputRms(),rt.audio.getOutputRms(),rt.audio.getAntiNoisePercent(),safety==null||safety.isEmpty()?"":"\n"+safety));}if(startButton!=null)startButton.setText(rt.audio.isRunning()?"STOP ANC":isHeadphones()?"START HEADPHONE ANC":"START VEHICLE ANC");handler.postDelayed(this,400);}};
+    private final Runnable statusTick=new Runnable(){@Override public void run(){
+        if(runtimeText!=null){String safety=rt.audio.getSafetyStatus();runtimeText.setText(String.format(Locale.US,"%s · %s · mic %.5f RMS · drive %.5f RMS · limit %d%%%s",rt.audio.isRunning()?"RUNNING":"STOPPED",profileName(),rt.audio.getInputRms(),rt.audio.getOutputRms(),rt.audio.getAntiNoisePercent(),safety==null||safety.isEmpty()?"":"\n"+safety));}
+        if(!isHeadphones()&&laneCountText!=null&&laneListText!=null){laneCountText.setText(String.format(Locale.US,"%d lanes monitored · %d actively cancelling",VehicleLaneRegistry.monitoredCount(),VehicleLaneRegistry.activeCount()));laneListText.setText(VehicleLaneRegistry.summary());}
+        if(startButton!=null)startButton.setText(rt.audio.isRunning()?"STOP ANC":isHeadphones()?"START HEADPHONE ANC":"START VEHICLE ANC");handler.postDelayed(this,400);
+    }};
 
     private void showPage(int page){controlPage.setVisibility(page==0?View.VISIBLE:View.GONE);splPage.setVisibility(page==1?View.VISIBLE:View.GONE);settingsPage.setVisibility(page==2?View.VISIBLE:View.GONE);styleTab(controlTab,page==0);styleTab(splTab,page==1);styleTab(settingsTab,page==2);}
     private boolean hasAudioPermission(){return checkSelfPermission(Manifest.permission.RECORD_AUDIO)==PackageManager.PERMISSION_GRANTED;}
