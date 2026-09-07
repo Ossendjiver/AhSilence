@@ -22,3 +22,4 @@ dependencyResolutionManagement {
 rootProject.name = "AhSilence"
 include(":app")
 include(":ancengine")
+include(":anclab")
