@@ -5,6 +5,7 @@
 #include <array>
 #include <cstdint>
 #include <memory>
+#include <string>
 
 #include "../dsp/Oscillator.h"
 #include "../dsp/FxLmsFilter.h"
@@ -12,17 +13,31 @@
 
 namespace anc::audio {
 
-/**
- * Hardware interface layer. Owns the Oboe duplex streams and implements
- * the real-time callback, but contains NO DSP math itself -- it only
- * wires together dsp::Oscillator, dsp::FxLmsFilter, and
- * dsp::SecondaryPathModel once per sample. That separation is what lets
- * the DSP classes be unit-tested on a desktop with no Android/Oboe
- * dependency at all (see the verification notes at the end).
- *
- * Built on oboe::FullDuplexStream, Oboe's own helper for synchronizing
- * an input and output stream without hand-rolled cross-stream locking.
- */
+struct CalibrationData {
+    bool success = false;
+    int32_t delaySamples = 0;
+    float pathGain = 1.0f;
+    float quality = 0.0f;
+    int32_t sampleRate = 0;
+    int32_t outputDeviceId = 0;
+    int32_t inputDeviceId = 0;
+};
+
+struct DiagnosticsData {
+    bool running = false;
+    int32_t sampleRate = 0;
+    int32_t performanceMode = 0;
+    int32_t sharingMode = 0;
+    int32_t framesPerBurst = 0;
+    int32_t xRunCount = 0;
+    int32_t outputDeviceId = 0;
+    int32_t inputDeviceId = 0;
+    float inputRms = 0.0f;
+    float outputRms = 0.0f;
+    float calibrationDelayMs = 0.0f;
+    float calibrationQuality = 0.0f;
+};
+
 class AncEngine : public oboe::FullDuplexStream, public oboe::AudioStreamErrorCallback {
 public:
     explicit AncEngine(int32_t preferredSampleRate);
@@ -31,29 +46,29 @@ public:
     AncEngine(const AncEngine &) = delete;
     AncEngine &operator=(const AncEngine &) = delete;
 
-    /// Opens and starts the duplex Oboe streams. Not real-time-safe; call from any non-audio thread.
     oboe::Result start() override;
-
-    /// Stops and closes the streams. Not real-time-safe.
     oboe::Result stop() override;
-
-    /// UI/analysis-thread entry point: the coarse FFT frequency estimate to track.
     void setTargetFrequency(float frequencyHz) noexcept;
-
-    /// UI-thread entry point: gain [0-100]% and phase trim [degrees]. Atomic, lock-free.
     void updateParameters(float gainPercent, float phaseDegrees) noexcept;
 
-    // --- oboe::FullDuplexStream -----------------------------------------
+    void beginCalibration() noexcept;
+    CalibrationData finishCalibration();
+    void applyCalibration(int32_t delaySamples, float pathGain, float quality) noexcept;
+    DiagnosticsData diagnostics() const noexcept;
+
     oboe::DataCallbackResult onBothStreamsReady(
             const void *inputData, int numInputFrames,
             void *outputData, int numOutputFrames) override;
 
-    // --- oboe::AudioStreamErrorCallback ----------------------------------
     void onErrorAfterClose(oboe::AudioStream *stream, oboe::Result error) override;
 
 private:
-    static constexpr int kReferenceTaps = 2;        // {cos, sin} narrowband basis
-    static constexpr int kSecondaryPathTaps = 512;  // ~10.6 ms headroom @ 48 kHz -- see SecondaryPathModel.h
+    static constexpr int kReferenceTaps = 2;
+    static constexpr int kSecondaryPathTaps = 512;
+    static constexpr int kCalibrationProbeFrames = 511;
+    static constexpr int kCalibrationCaptureFrames = 48000;
+    static constexpr int kCalibrationProbeStart = 4096;
+    static constexpr float kCalibrationProbeLevel = 0.08f;
 
     const int32_t mPreferredSampleRate;
     int32_t mActualSampleRate = 0;
@@ -70,6 +85,21 @@ private:
     std::atomic<float> mPhaseOffsetRad{0.0f};
     std::atomic<float> mTargetFrequencyHz{0.0f};
     std::atomic<bool> mIsRunning{false};
+
+    std::atomic<bool> mCalibrating{false};
+    std::atomic<int32_t> mCalibrationFrame{0};
+    std::array<float, kCalibrationProbeFrames> mCalibrationProbe{};
+    std::array<float, kCalibrationCaptureFrames> mCalibrationInput{};
+    std::atomic<int32_t> mCapturedCalibrationFrames{0};
+
+    std::atomic<int32_t> mCalibratedDelaySamples{0};
+    std::atomic<float> mCalibratedPathGain{1.0f};
+    std::atomic<float> mCalibrationQuality{0.0f};
+    std::atomic<float> mInputRms{0.0f};
+    std::atomic<float> mOutputRms{0.0f};
+
+    void buildCalibrationProbe() noexcept;
+    void updateSecondaryPathModel() noexcept;
 };
 
 } // namespace anc::audio
