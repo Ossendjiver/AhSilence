@@ -45,6 +45,13 @@ public final class FeedbackFxNlms {
     private float inRms = 0f;
     private float outRms = 0f;
 
+    // Lightweight diagnostic taps read by the graph buffer after decimation.
+    private volatile float lastReference = 0f;
+    private volatile float lastPredictedCancellation = 0f;
+    private volatile float lastExpectedResidual = 0f;
+    private volatile float lastMeasuredResidual = 0f;
+    private volatile float lastControllerOutput = 0f;
+
     public FeedbackFxNlms(float[] secondaryPath, int delaySamples, int controllerTaps, float ceiling) {
         // Headphone broadband mode is intentionally fixed to a 128-tap adaptive controller.
         taps = CONTROLLER_TAPS;
@@ -78,6 +85,8 @@ public final class FeedbackFxNlms {
         Arrays.fill(refDelay, 0f);
         xPos = xfPos = yPos = refPos = 0;
         dcX1 = dcY1 = inRms = outRms = 0f;
+        lastReference = lastPredictedCancellation = lastExpectedResidual = 0f;
+        lastMeasuredResidual = lastControllerOutput = 0f;
     }
 
     public float process(float error) {
@@ -87,7 +96,8 @@ public final class FeedbackFxNlms {
         dcY1 = hp;
 
         // Feedback ANC reference reconstruction: subtract the predicted anti-noise return.
-        float reference = hp - convolveDelayedOutput();
+        float predictedCancellation = convolveDelayedOutput();
+        float reference = hp - predictedCancellation;
 
         xHist[xPos] = reference;
         float y = softLimit(dotCircular(w, xHist, xPos), outputCeiling);
@@ -109,6 +119,15 @@ public final class FeedbackFxNlms {
             w[k] = (1f - leakage) * w[k] - step * xfHist[idx];
         }
 
+        // These diagnostics are deliberately computed before advancing the circular indices.
+        // "Expected" is the residual implied by d_hat + S_hat*y_return. It is a model
+        // diagnostic, not an independent microphone measurement.
+        lastReference = reference;
+        lastPredictedCancellation = predictedCancellation;
+        lastExpectedResidual = reference + predictedCancellation;
+        lastMeasuredResidual = hp;
+        lastControllerOutput = y;
+
         if (++xPos == taps) xPos = 0;
         if (++xfPos == taps) xfPos = 0;
         if (++yPos == yDelay.length) yPos = 0;
@@ -126,6 +145,12 @@ public final class FeedbackFxNlms {
     public float outputRms() {
         return (float) Math.sqrt(Math.max(0f, outRms));
     }
+
+    public float diagnosticReference() { return lastReference; }
+    public float diagnosticPredictedCancellation() { return lastPredictedCancellation; }
+    public float diagnosticExpectedResidual() { return lastExpectedResidual; }
+    public float diagnosticMeasuredResidual() { return lastMeasuredResidual; }
+    public float diagnosticControllerOutput() { return lastControllerOutput; }
 
     private float dotCircular(float[] c, float[] h, int newest) {
         float sum = 0f;
