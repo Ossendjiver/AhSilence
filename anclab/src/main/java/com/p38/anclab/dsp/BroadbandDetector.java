@@ -35,8 +35,12 @@ public final class BroadbandDetector {
         while (iterator.hasNext()) if (nowMs - iterator.next().lastSeenMs > STALE_MS) iterator.remove();
         List<Candidate> ready = new ArrayList<>();
         for (Track track : tracks) {
-            if (!track.emitted && track.confirmations >= 3 && nowMs - track.firstSeenMs >= MINIMUM_AGE_MS) {
-                track.emitted = true;
+            // Mature candidates are deliberately reconsidered on later scans instead of being
+            // emitted only once. If all fallback controller slots were occupied when a strong
+            // physical tone first matured, it can therefore still be admitted after capacity
+            // becomes available. VehicleNarrowbandBank remains responsible for duplicate,
+            // strength and lane-capacity policy.
+            if (track.confirmations >= 3 && nowMs - track.firstSeenMs >= MINIMUM_AGE_MS) {
                 double bin = Math.rint(track.frequencyHz * 2.0) / 2.0;
                 ready.add(new Candidate(String.format(java.util.Locale.US, "broad-%.1f", bin),
                         track.frequencyHz, track.dbFs, track.confirmations));
@@ -54,7 +58,6 @@ public final class BroadbandDetector {
         double frequencyHz;
         double dbFs;
         int confirmations;
-        boolean emitted;
         boolean seenThisScan;
         Track(double frequencyHz, long nowMs) {
             firstSeenMs = nowMs; lastSeenMs = nowMs; this.frequencyHz = frequencyHz;
