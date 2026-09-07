@@ -74,10 +74,13 @@ public final class ProfileStore {
             o.put("id", PROFILE_HEADPHONES);
             o.put("name", "Headphones");
             o.put("bench", true);
-            o.put("algorithm", "feedback-fxnlms");
+            o.put("algorithm", "broadband-feedback-fxnlms");
+            o.put("controllerTaps", 128);
+            o.put("secondaryPathTaps", 128);
+            o.put("usesMeasuredBulkDelay", true);
             o.put("calibrationFile", "calibration.json");
             o.put("testFrequenciesHz", new JSONArray(Arrays.asList(20,30,40,50,63,80,100,125,160,200)));
-            o.put("notes", "Stored secondary-path calibration loads automatically; recalibrate after route, microphone or physical-placement changes.");
+            o.put("notes", "Generic experimental broadband 128-tap feedback FxNLMS. Stored secondary-path calibration loads automatically; recalibrate after route, microphone or physical-placement changes.");
         } catch (Exception ignored) { }
         return o;
     }
