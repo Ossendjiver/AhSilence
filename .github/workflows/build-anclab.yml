@@ -28,6 +28,11 @@ jobs:
         run: |
           yes | sdkmanager --licenses >/dev/null || true
           sdkmanager "platforms;android-36" "build-tools;35.0.0"
+      - name: Restore ANC Lab debug signing key
+        uses: actions/cache@v4
+        with:
+          path: ~/.android/debug.keystore
+          key: anclab-debug-signing-v1
       - name: Make Gradle wrapper executable
         run: chmod +x gradlew
       - name: Build ANC Lab debug APK
