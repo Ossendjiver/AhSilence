@@ -1,14 +1,21 @@
-name: Build ANC Lab APK
+name: Build AhSilence + ANC Lab
 
 on:
   workflow_dispatch:
   push:
     branches:
       - feature/headphone-fxnlms-v05
-      - feature/p38-dryrun-v058
+      - ci/full-repo-build
     paths:
+      - 'app/**'
+      - 'ancengine/**'
       - 'anclab/**'
+      - 'gradle/**'
+      - 'build.gradle.kts'
       - 'settings.gradle.kts'
+      - 'gradle.properties'
+      - 'gradlew'
+      - 'gradlew.bat'
       - '.github/workflows/build-anclab.yml'
 
 permissions:
@@ -19,21 +26,30 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '21'
           cache: gradle
+
       - uses: android-actions/setup-android@v3
-      - name: Install Android SDK
+
+      - name: Install Android SDK, NDK and CMake
         run: |
           yes | sdkmanager --licenses >/dev/null || true
-          sdkmanager "platforms;android-36" "build-tools;35.0.0"
+          sdkmanager \
+            "platforms;android-36" \
+            "build-tools;35.0.0" \
+            "ndk;27.1.12297006" \
+            "cmake;3.22.1"
+
       - name: Restore ANC Lab development signing directory
         uses: actions/cache@v4
         with:
           path: ~/.android
           key: anclab-debug-signing-v2
+
       - name: Ensure stable ANC Lab debug signing key
         shell: bash
         run: |
@@ -54,11 +70,25 @@ jobs:
             -keystore "$HOME/.android/debug.keystore" \
             -storepass android \
             -alias androiddebugkey | grep -E "SHA256:|Owner:|Valid from:"
+
       - name: Make Gradle wrapper executable
         run: chmod +x gradlew
-      - name: Test and build ANC Lab debug APK
-        run: ./gradlew :anclab:clean :anclab:testDebugUnitTest :anclab:assembleDebug --stacktrace
-      - name: Upload ANC Lab APK
+
+      - name: Compile and test complete Gradle project
+        run: ./gradlew clean build --stacktrace
+
+      - name: Upload complete compiled outputs
+        uses: actions/upload-artifact@v4
+        with:
+          name: AhSilence-full-build
+          path: |
+            app/build/outputs/apk/**/*.apk
+            anclab/build/outputs/apk/**/*.apk
+            ancengine/build/outputs/aar/*.aar
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload installable ANC Lab debug APK
         uses: actions/upload-artifact@v4
         with:
           name: ANC-Lab-v0.5.8-rebuild-debug
