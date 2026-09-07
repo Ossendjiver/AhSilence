@@ -13,7 +13,7 @@ import android.media.AudioTrack;
 import android.media.MediaRecorder;
 import android.os.Build;
 
-import com.p38.anclab.dsp.FeedbackFxNlms;
+import com.p38.anclab.dsp.HeadphoneFeedforwardFxNlms;
 import com.p38.anclab.profile.HeadphoneCalibration;
 import com.p38.anclab.recording.AppLog;
 import com.p38.anclab.recording.MonitoringLog;
@@ -30,6 +30,9 @@ import java.util.concurrent.atomic.AtomicBoolean;
 public final class AudioEngine {
     public static final int SAMPLE_RATE = 48000;
     private static final String TAG = "AudioEngine";
+    private static final int GRAPH_POINTS = 720;
+    private static final int GRAPH_DECIMATION = 24; // ~2 kHz graph-domain samples
+
     private final Context context;
     private final AudioManager audioManager;
     private final AncStorage storage;
@@ -42,10 +45,19 @@ public final class AudioEngine {
     private int inputDeviceId = 0, outputDeviceId = 0;
     private String inputRoute = "System default", outputRoute = "System default";
     private HeadphoneCalibration calibration;
-    private FeedbackFxNlms fx;
+    private HeadphoneFeedforwardFxNlms fx;
     private volatile float inputRms = 0f, outputRms = 0f;
     private volatile String lastError = "None";
     private volatile boolean monitorLogEnabled = true;
+
+    private final Object graphLock = new Object();
+    private final float[] graphReference = new float[GRAPH_POINTS];
+    private final float[] graphDrive = new float[GRAPH_POINTS];
+    private final float[] graphPredictedCancellation = new float[GRAPH_POINTS];
+    private final float[] graphPredictedResidual = new float[GRAPH_POINTS];
+    private int graphWrite = 0;
+    private int graphCount = 0;
+    private int graphDecimator = 0;
 
     public static final class DeviceChoice {
         public final int id; public final String name; public final AudioDeviceInfo info;
@@ -55,6 +67,17 @@ public final class AudioEngine {
     public static final class CalibrationResult {
         public final boolean success; public final HeadphoneCalibration calibration; public final String message;
         public CalibrationResult(boolean s,HeadphoneCalibration c,String m){success=s;calibration=c;message=m;}
+    }
+    public static final class GraphSnapshot {
+        public final float[] reference;
+        public final float[] drive;
+        public final float[] predictedCancellation;
+        public final float[] predictedResidual;
+        public final float sampleRateHz;
+        public final boolean running;
+        GraphSnapshot(float[] r,float[] d,float[] c,float[] e,float sr,boolean running){
+            reference=r;drive=d;predictedCancellation=c;predictedResidual=e;sampleRateHz=sr;this.running=running;
+        }
     }
 
     public AudioEngine(Context c,AncStorage storage){context=c.getApplicationContext();audioManager=(AudioManager)context.getSystemService(Context.AUDIO_SERVICE);this.storage=storage;recorder=new SessionRecorder(context,storage);monitoringLog=new MonitoringLog(context,storage);}
@@ -70,6 +93,19 @@ public final class AudioEngine {
     public boolean isRunning(){return running.get();} public void setMonitorLogEnabled(boolean enabled){monitorLogEnabled=enabled;}
     public void applyCalibration(HeadphoneCalibration c){calibration=c;if(c!=null)AppLog.i(TAG,"Stored headphone calibration applied: "+String.format(Locale.US,"%.1f ms / %.0f%%",c.delayMs(),c.quality*100f));}
     public HeadphoneCalibration getCalibration(){return calibration;}
+
+    public GraphSnapshot getGraphSnapshot(){
+        synchronized(graphLock){
+            int n=graphCount;
+            float[] r=new float[n],d=new float[n],c=new float[n],e=new float[n];
+            int start=(graphWrite-n+GRAPH_POINTS)%GRAPH_POINTS;
+            for(int i=0;i<n;i++){
+                int p=(start+i)%GRAPH_POINTS;
+                r[i]=graphReference[p];d[i]=graphDrive[p];c[i]=graphPredictedCancellation[p];e[i]=graphPredictedResidual[p];
+            }
+            return new GraphSnapshot(r,d,c,e,SAMPLE_RATE/(float)GRAPH_DECIMATION,running.get());
+        }
+    }
 
     @SuppressLint("MissingPermission")
     public CalibrationResult calibrateHeadphones(){
@@ -105,15 +141,30 @@ public final class AudioEngine {
         if(running.get())return true;if(calibration==null){lastError="No stored headphone calibration";return false;}
         try{
             record=buildRecord();track=buildTrack();if(record==null||track==null)throw new IllegalStateException("Could not open selected audio route");
-            fx=new FeedbackFxNlms(calibration.secondaryPath,calibration.delaySamples,FeedbackFxNlms.CONTROLLER_TAPS,calibration.safeOutputCeiling);
-            fx.setAdaptationRate(calibration.delaySamples>2400?0.018f:0.055f);
+            fx=new HeadphoneFeedforwardFxNlms(calibration.secondaryPath,calibration.delaySamples,calibration.safeOutputCeiling);
+            fx.setAdaptationRate(calibration.delaySamples>2400?0.012f:0.035f);
+            clearGraph();
             record.startRecording();track.play();running.set(true);if(monitorLogEnabled)monitoringLog.start();worker=new Thread(this::runLoop,"ANC-Lab-Audio");worker.setPriority(Thread.MAX_PRIORITY);worker.start();
-            AppLog.i(TAG,"Headphone broadband 128-tap feedback FxNLMS started on "+outputRoute+" delaySamples="+calibration.delaySamples+" secondaryTaps="+(calibration.secondaryPath==null?0:calibration.secondaryPath.length));
+            AppLog.i(TAG,"Headphone reference-mic 128-tap feed-forward FxNLMS started on "+outputRoute+" delaySamples="+calibration.delaySamples+" secondaryTaps="+(calibration.secondaryPath==null?0:calibration.secondaryPath.length));
             return true;
         }catch(Exception e){lastError=e.getMessage();AppLog.e(TAG,"Start failed",e);stop();return false;}
     }
 
-    private void runLoop(){int block=192;float[] in=new float[block],out=new float[block];while(running.get()){int n=record.read(in,0,block,AudioRecord.READ_BLOCKING);if(n<=0)continue;for(int i=0;i<n;i++)out[i]=fx.process(in[i]);int w=track.write(out,0,n,AudioTrack.WRITE_BLOCKING);inputRms=fx.inputRms();outputRms=fx.outputRms();recorder.onAudio(in,out,n);monitoringLog.sample(System.currentTimeMillis(),inputRms,outputRms,"HEADPHONE_BROADBAND_FXNLMS_128",inputRoute,outputRoute);if(w<0){lastError="AudioTrack write error "+w;break;}}running.set(false);}
+    private void clearGraph(){synchronized(graphLock){graphWrite=graphCount=graphDecimator=0;}}
+    private void graphSample(){
+        if(++graphDecimator<GRAPH_DECIMATION)return;
+        graphDecimator=0;
+        synchronized(graphLock){
+            graphReference[graphWrite]=fx.diagnosticReference();
+            graphDrive[graphWrite]=fx.diagnosticDrive();
+            graphPredictedCancellation[graphWrite]=fx.diagnosticPredictedCancellation();
+            graphPredictedResidual[graphWrite]=fx.diagnosticPredictedResidual();
+            graphWrite=(graphWrite+1)%GRAPH_POINTS;
+            if(graphCount<GRAPH_POINTS)graphCount++;
+        }
+    }
+
+    private void runLoop(){int block=192;float[] in=new float[block],out=new float[block];while(running.get()){int n=record.read(in,0,block,AudioRecord.READ_BLOCKING);if(n<=0)continue;for(int i=0;i<n;i++){out[i]=fx.process(in[i]);graphSample();}int w=track.write(out,0,n,AudioTrack.WRITE_BLOCKING);inputRms=fx.inputRms();outputRms=fx.outputRms();recorder.onAudio(in,out,n);monitoringLog.sample(System.currentTimeMillis(),inputRms,outputRms,"HEADPHONE_REFERENCE_FXNLMS_128",inputRoute,outputRoute);if(w<0){lastError="AudioTrack write error "+w;break;}}running.set(false);}
 
     public synchronized void stop(){running.set(false);if(worker!=null&&worker!=Thread.currentThread()){try{worker.join(600);}catch(Exception ignored){}}worker=null;try{if(record!=null){record.stop();record.release();}}catch(Exception ignored){}try{if(track!=null){track.pause();track.flush();track.stop();track.release();}}catch(Exception ignored){}record=null;track=null;monitoringLog.stop();if(recorder.isActive())recorder.stop();inputRms=outputRms=0f;}
     public boolean startRecording(){return recorder.start(SAMPLE_RATE);}public void stopRecording(){recorder.stop();}public boolean isRecording(){return recorder.isActive();}
