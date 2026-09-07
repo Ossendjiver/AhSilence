@@ -3,113 +3,219 @@ package com.p38.anclab.dsp;
 import java.util.Arrays;
 
 /**
- * Headphone-mode 128-tap feed-forward FxNLMS using the phone microphone as a
- * REFERENCE only. There is no in-ear error microphone during normal use.
+ * Predictive 128-tap headphone FxNLMS controller for a phone-mounted reference mic.
  *
- * The adaptive error is therefore a VIRTUAL/MODELLED error:
- *   e_hat[n] = d_hat[n] + S_hat(z)y[n]
- * where d_hat is the phone-mic reference used as an approximation of the
- * disturbance at the ear, and S_hat is the stored calibrated headphone path.
+ * Normal IEM use has no in-ear error microphone, so the phone microphone is treated
+ * strictly as a reference. The calibrated bulk output delay becomes a prediction
+ * horizon H. A direct-horizon adaptive linear predictor learns x[n] from x[n-H...]
+ * and is then applied to the current reference history to estimate x[n+H].
  *
- * This is intentionally not presented as a measured residual. The graph/UI
- * must label predicted cancellation and predicted output as modelled values.
+ * The predicted future disturbance drives a 128-tap FxNLMS inverse of the measured
+ * 128-tap headphone secondary-path FIR. The bulk route delay is NOT applied again
+ * inside the FxNLMS path because it is already absorbed by the prediction horizon.
+ *
+ * Prediction confidence is derived from normalized prediction error. Unpredictable
+ * broadband content is smoothly suppressed rather than converted into arbitrary
+ * anti-noise.
  */
 public final class HeadphoneFeedforwardFxNlms {
     public static final int CONTROLLER_TAPS = 128;
+    public static final int PREDICTOR_TAPS = 128;
 
-    private final float[] w = new float[CONTROLLER_TAPS];
-    private final float[] xHist = new float[CONTROLLER_TAPS];
-    private final float[] xfHist = new float[CONTROLLER_TAPS];
+    private static final int PREDICTOR_ADAPT_DECIMATION = 4;
+    private static final float EPS = 1e-8f;
+
+    private final int horizonSamples;
     private final float[] secondary;
-    private final float[] outputHist;
-    private final float[] referencePathHist;
-    private final int delaySamples;
 
-    private int xPos = 0;
-    private int xfPos = 0;
-    private int yPos = 0;
-    private int pathRefPos = 0;
+    // Direct-horizon predictor.
+    private final float[] predictorWeights = new float[PREDICTOR_TAPS];
+    private final float[] referenceHistory;
+    private int referencePos = 0;
+    private long samplesSeen = 0;
+    private int predictorAdaptCounter = 0;
+    private float predictorMu = 0.08f;
+    private float predictorLeakage = 0.000002f;
+    private float signalPower = 1e-8f;
+    private float predictorErrorPower = 1e-8f;
+    private float confidence = 0f;
+    private float confidenceSmooth = 0f;
 
-    private float mu = 0.035f;
-    private float leakage = 0.00002f;
+    // 128-tap cancellation controller.
+    private final float[] controllerWeights = new float[CONTROLLER_TAPS];
+    private final float[] predictedHistory = new float[CONTROLLER_TAPS];
+    private final float[] filteredPredictedHistory = new float[CONTROLLER_TAPS];
+    private int predictedPos = 0;
+    private int filteredPos = 0;
+
+    // FIR-only secondary-path histories. Bulk latency is handled by prediction horizon.
+    private final float[] driveHistory;
+    private final float[] predictorPathHistory;
+    private int drivePos = 0;
+    private int pathPos = 0;
+
+    private float controllerMu = 0.035f;
+    private float controllerLeakage = 0.00002f;
     private float outputCeiling;
-    private float dcX1 = 0f, dcY1 = 0f;
-    private float inRms = 0f, outRms = 0f;
+
+    private float dcX1 = 0f;
+    private float dcY1 = 0f;
+    private float inRms = 0f;
+    private float outRms = 0f;
 
     private volatile float lastReference = 0f;
+    private volatile float lastPredictedFuture = 0f;
     private volatile float lastDrive = 0f;
     private volatile float lastPredictedCancellation = 0f;
     private volatile float lastPredictedResidual = 0f;
 
-    public HeadphoneFeedforwardFxNlms(float[] secondaryPath, int delaySamples, float ceiling) {
+    public HeadphoneFeedforwardFxNlms(float[] secondaryPath, int bulkDelaySamples, float ceiling) {
+        horizonSamples = Math.max(1, bulkDelaySamples);
         secondary = secondaryPath == null || secondaryPath.length == 0
                 ? new float[]{1f}
                 : Arrays.copyOf(secondaryPath, secondaryPath.length);
-        this.delaySamples = Math.max(0, delaySamples);
-        int history = Math.max(512, this.delaySamples + secondary.length + 16);
-        outputHist = new float[history];
-        referencePathHist = new float[history];
-        outputCeiling = Math.max(0.02f, Math.min(0.5f, ceiling));
+
+        referenceHistory = new float[horizonSamples + PREDICTOR_TAPS + 32];
+        int pathHistory = Math.max(512, secondary.length + 32);
+        driveHistory = new float[pathHistory];
+        predictorPathHistory = new float[pathHistory];
+        outputCeiling = clamp(Math.abs(ceiling), 0.02f, 0.5f);
     }
 
+    /** Existing AudioEngine API: controls the cancellation FxNLMS step size. */
     public void setAdaptationRate(float v) {
-        mu = Math.max(0f, Math.min(0.20f, v));
+        controllerMu = clamp(v, 0f, 0.15f);
+    }
+
+    public void setPredictorAdaptationRate(float v) {
+        predictorMu = clamp(v, 0f, 0.25f);
     }
 
     public float process(float referenceMic) {
-        // DC blocker only; retain broadband content above DC.
+        // Remove DC only; retain the useful broadband reference content.
         float x = referenceMic - dcX1 + 0.995f * dcY1;
         dcX1 = referenceMic;
         dcY1 = x;
 
-        xHist[xPos] = x;
-        float y = clamp(dotCircular(w, xHist, xPos), outputCeiling);
-        outputHist[yPos] = y;
+        referenceHistory[referencePos] = x;
+        samplesSeen++;
 
-        // Standard filtered-X reference, using the stored S_hat including bulk delay.
-        referencePathHist[pathRefPos] = x;
-        float xf = convolveDelayed(referencePathHist, pathRefPos);
-        xfHist[xfPos] = xf;
+        // Once x[n] arrives, train a model that predicted it from x[n-H ...].
+        if (samplesSeen > horizonSamples + PREDICTOR_TAPS) {
+            if (++predictorAdaptCounter >= PREDICTOR_ADAPT_DECIMATION) {
+                predictorAdaptCounter = 0;
+                adaptPredictor(x);
+            }
+        }
 
-        // Modelled cancellation arriving at the ear/mic after the secondary path.
-        float predictedCancellation = convolveDelayed(outputHist, yPos);
-        float predictedResidual = x + predictedCancellation;
+        // Direct estimate of x[n+H] from the current microphone history.
+        float predictedFuture = samplesSeen > horizonSamples + PREDICTOR_TAPS
+                ? dotCircular(predictorWeights, referenceHistory, referencePos)
+                : 0f;
 
-        float norm = 1e-5f;
-        for (float v : xfHist) norm += v * v;
-        float step = mu * predictedResidual / norm;
-        for (int k = 0; k < CONTROLLER_TAPS; k++) {
-            int idx = xfPos - k;
-            if (idx < 0) idx += CONTROLLER_TAPS;
-            w[k] = (1f - leakage) * w[k] - step * xfHist[idx];
+        // Bound extrapolation to the recent measured level.
+        float rms = (float)Math.sqrt(Math.max(signalPower, 1e-8f));
+        float predictionLimit = Math.max(0.004f, Math.min(0.35f, 3.0f * rms));
+        predictedFuture = clamp(predictedFuture, -predictionLimit, predictionLimit);
+
+        confidenceSmooth = 0.998f * confidenceSmooth + 0.002f * confidence;
+
+        // Below ~5% measured predictive skill, keep the headphone drive near zero.
+        // By ~45% skill, allow the full safe calibrated ceiling.
+        float outputGate = smoothstep(0.05f, 0.45f, confidenceSmooth);
+
+        predictedHistory[predictedPos] = predictedFuture;
+        float rawDrive = dotCircular(controllerWeights, predictedHistory, predictedPos);
+        float drive = clamp(rawDrive * outputGate, -outputCeiling, outputCeiling);
+        driveHistory[drivePos] = drive;
+
+        // Modelled cancellation and virtual ear residual.
+        float predictedCancellation = convolveSecondary(driveHistory, drivePos);
+        float predictedResidual = predictedFuture + predictedCancellation;
+
+        // FxNLMS reference filtered through the FIR part of the headphone path.
+        predictorPathHistory[pathPos] = predictedFuture;
+        float xf = convolveSecondary(predictorPathHistory, pathPos);
+        filteredPredictedHistory[filteredPos] = xf;
+
+        // Adapt only where the predictor has demonstrated useful skill.
+        float adaptGate = smoothstep(0.02f, 0.30f, confidenceSmooth);
+        if (adaptGate > 0f) {
+            float norm = 1e-5f;
+            for (float v : filteredPredictedHistory) norm += v * v;
+            float step = controllerMu * adaptGate * predictedResidual / norm;
+            for (int k = 0; k < CONTROLLER_TAPS; k++) {
+                int idx = filteredPos - k;
+                if (idx < 0) idx += CONTROLLER_TAPS;
+                controllerWeights[k] = (1f - controllerLeakage) * controllerWeights[k]
+                        - step * filteredPredictedHistory[idx];
+            }
+        } else {
+            for (int k = 0; k < CONTROLLER_TAPS; k++) {
+                controllerWeights[k] *= (1f - controllerLeakage);
+            }
         }
 
         lastReference = x;
-        lastDrive = y;
+        lastPredictedFuture = predictedFuture;
+        lastDrive = drive;
         lastPredictedCancellation = predictedCancellation;
         lastPredictedResidual = predictedResidual;
 
-        if (++xPos == CONTROLLER_TAPS) xPos = 0;
-        if (++xfPos == CONTROLLER_TAPS) xfPos = 0;
-        if (++yPos == outputHist.length) yPos = 0;
-        if (++pathRefPos == referencePathHist.length) pathRefPos = 0;
+        if (++referencePos == referenceHistory.length) referencePos = 0;
+        if (++predictedPos == CONTROLLER_TAPS) predictedPos = 0;
+        if (++filteredPos == CONTROLLER_TAPS) filteredPos = 0;
+        if (++drivePos == driveHistory.length) drivePos = 0;
+        if (++pathPos == predictorPathHistory.length) pathPos = 0;
 
         inRms = 0.995f * inRms + 0.005f * x * x;
-        outRms = 0.995f * outRms + 0.005f * y * y;
-        return y;
+        outRms = 0.995f * outRms + 0.005f * drive * drive;
+        return drive;
+    }
+
+    private void adaptPredictor(float currentTarget) {
+        int oldNewest = referencePos - horizonSamples;
+        while (oldNewest < 0) oldNewest += referenceHistory.length;
+
+        float prediction = dotCircular(predictorWeights, referenceHistory, oldNewest);
+        float error = currentTarget - prediction;
+
+        float norm = 1e-6f;
+        int p = oldNewest;
+        for (int k = 0; k < PREDICTOR_TAPS; k++) {
+            float v = referenceHistory[p];
+            norm += v * v;
+            if (--p < 0) p = referenceHistory.length - 1;
+        }
+
+        float step = predictorMu * error / norm;
+        p = oldNewest;
+        for (int k = 0; k < PREDICTOR_TAPS; k++) {
+            predictorWeights[k] = (1f - predictorLeakage) * predictorWeights[k]
+                    + step * referenceHistory[p];
+            if (--p < 0) p = referenceHistory.length - 1;
+        }
+
+        // Predictive skill = 1 - normalized MSE, smoothed over time.
+        signalPower = 0.9995f * signalPower + 0.0005f * currentTarget * currentTarget;
+        predictorErrorPower = 0.9995f * predictorErrorPower + 0.0005f * error * error;
+        confidence = clamp(1f - predictorErrorPower / (signalPower + EPS), 0f, 1f);
     }
 
     public float inputRms() { return (float)Math.sqrt(Math.max(0f, inRms)); }
     public float outputRms() { return (float)Math.sqrt(Math.max(0f, outRms)); }
+    public float predictorConfidence() { return confidenceSmooth; }
+    public int predictionHorizonSamples() { return horizonSamples; }
+
     public float diagnosticReference() { return lastReference; }
+    public float diagnosticPredictedFuture() { return lastPredictedFuture; }
     public float diagnosticDrive() { return lastDrive; }
     public float diagnosticPredictedCancellation() { return lastPredictedCancellation; }
     public float diagnosticPredictedResidual() { return lastPredictedResidual; }
 
-    private float convolveDelayed(float[] history, int newestPosition) {
+    private float convolveSecondary(float[] history, int newest) {
         float sum = 0f;
-        int p = newestPosition - delaySamples;
-        while (p < 0) p += history.length;
+        int p = newest;
         for (float h : secondary) {
             sum += h * history[p];
             if (--p < 0) p = history.length - 1;
@@ -117,17 +223,22 @@ public final class HeadphoneFeedforwardFxNlms {
         return sum;
     }
 
-    private static float dotCircular(float[] c, float[] h, int newest) {
+    private static float dotCircular(float[] coefficients, float[] history, int newest) {
         float sum = 0f;
         int p = newest;
-        for (float v : c) {
-            sum += v * h[p];
-            if (--p < 0) p = h.length - 1;
+        for (float c : coefficients) {
+            sum += c * history[p];
+            if (--p < 0) p = history.length - 1;
         }
         return sum;
     }
 
-    private static float clamp(float v, float ceiling) {
-        return Math.max(-ceiling, Math.min(ceiling, v));
+    private static float smoothstep(float edge0, float edge1, float x) {
+        float t = clamp((x - edge0) / Math.max(1e-6f, edge1 - edge0), 0f, 1f);
+        return t * t * (3f - 2f * t);
+    }
+
+    private static float clamp(float v, float lo, float hi) {
+        return Math.max(lo, Math.min(hi, v));
     }
 }
