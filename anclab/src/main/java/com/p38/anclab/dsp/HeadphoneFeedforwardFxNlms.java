@@ -10,23 +10,17 @@ import java.util.Arrays;
  * horizon. A direct-horizon adaptive linear predictor learns x[n] from x[n-H...]
  * and is then applied to the current reference history to estimate the future disturbance.
  *
- * The predicted disturbance drives a 128-tap controller derived from the measured
- * 128-tap headphone secondary path. The controller is seeded with a conservative,
- * regularised matched inverse of the measured path rather than starting from zero.
- * This is important for real calibrations whose secondary-path coefficients are very small:
- * zero-start FxNLMS can otherwise take effectively forever to build enough inverse gain.
- *
- * The inverse seed has an intrinsic delay of secondary.length - 1 samples, so that delay
- * is added to the measured bulk route delay when choosing the prediction horizon. FxNLMS
- * then performs only a slow bounded refinement of the seeded inverse.
- *
- * Prediction confidence is derived from normalized prediction error. Unpredictable
- * broadband content is smoothly suppressed rather than converted into arbitrary anti-noise.
+ * The active headphone ANC band is deliberately limited to 15-600 Hz. The reference is
+ * high-passed at 15 Hz and fourth-order low-passed at 600 Hz before it can train or drive
+ * either adaptive stage. The final cancellation drive and the filtered-X model each pass
+ * through their own matching fourth-order 600 Hz safety low-pass. This keeps phone/USB/ADC
+ * electrical tones and controller-generated HF energy out of the headphone output path.
  */
 public final class HeadphoneFeedforwardFxNlms {
     public static final int CONTROLLER_TAPS = 128;
     public static final int PREDICTOR_TAPS = 128;
 
+    private static final int SAMPLE_RATE = 48000;
     private static final int PREDICTOR_ADAPT_DECIMATION = 4;
     private static final float EPS = 1e-8f;
     private static final float INVERSE_REGULARISATION = 4.0f;
@@ -34,7 +28,13 @@ public final class HeadphoneFeedforwardFxNlms {
 
     private final int horizonSamples;
     private final int inverseDelaySamples;
+    private final int outputFilterDelaySamples;
     private final float[] secondary;
+
+    // Keep the three filters independent: they represent different causal signal paths.
+    private final HeadphoneBandLimiter referenceBand = new HeadphoneBandLimiter(SAMPLE_RATE, true);
+    private final HeadphoneBandLimiter outputLowPass = new HeadphoneBandLimiter(SAMPLE_RATE, false);
+    private final HeadphoneBandLimiter filteredXPathLowPass = new HeadphoneBandLimiter(SAMPLE_RATE, false);
 
     // Direct-horizon predictor.
     private final float[] predictorWeights = new float[PREDICTOR_TAPS];
@@ -63,16 +63,13 @@ public final class HeadphoneFeedforwardFxNlms {
     private int pathPos = 0;
 
     private float controllerMu = 0.035f;
-    // The old value (2e-5/sample) erased a calibrated inverse in a few seconds.
-    // With no physical in-ear error mic, retain the measured model and refine slowly.
     private float controllerLeakage = 0.00000001f;
     private float outputCeiling;
 
-    private float dcX1 = 0f;
-    private float dcY1 = 0f;
     private float inRms = 0f;
     private float outRms = 0f;
 
+    private volatile float lastRawReference = 0f;
     private volatile float lastReference = 0f;
     private volatile float lastPredictedFuture = 0f;
     private volatile float lastDrive = 0f;
@@ -85,9 +82,11 @@ public final class HeadphoneFeedforwardFxNlms {
                 : Arrays.copyOf(secondaryPath, secondaryPath.length);
 
         // A reversed-path matched inverse produces its main cancellation lobe after
-        // secondary.length - 1 samples. Predict through that small extra controller delay too.
+        // secondary.length - 1 samples. The final 600 Hz output filter adds another small
+        // causal delay; forecast through both so filtering does not silently make us late.
         inverseDelaySamples = Math.max(0, secondary.length - 1);
-        horizonSamples = Math.max(1, bulkDelaySamples + inverseDelaySamples);
+        outputFilterDelaySamples = HeadphoneBandLimiter.approximateOutputDelaySamples(SAMPLE_RATE);
+        horizonSamples = Math.max(1, bulkDelaySamples + inverseDelaySamples + outputFilterDelaySamples);
 
         referenceHistory = new float[horizonSamples + PREDICTOR_TAPS + 32];
         int pathHistory = Math.max(512, secondary.length + 32);
@@ -101,10 +100,6 @@ public final class HeadphoneFeedforwardFxNlms {
     /**
      * Conservative regularised matched inverse:
      *     W[k] = -reverse(S)[k] / ((1 + lambda) * ||S||^2)
-     *
-     * This is deliberately less aggressive than an exact deconvolution. It gives the
-     * controller meaningful calibrated gain immediately while the output ceiling and
-     * prediction-confidence gate remain the final safety bounds.
      */
     private void seedControllerFromSecondaryPath() {
         float energy = 0f;
@@ -121,7 +116,6 @@ public final class HeadphoneFeedforwardFxNlms {
         }
     }
 
-    /** Existing AudioEngine API: controls the slow cancellation FxNLMS refinement rate. */
     public void setAdaptationRate(float v) {
         controllerMu = clamp(v, 0f, 0.15f);
     }
@@ -131,15 +125,13 @@ public final class HeadphoneFeedforwardFxNlms {
     }
 
     public float process(float referenceMic) {
-        // Remove DC only; retain the useful broadband reference content.
-        float x = referenceMic - dcX1 + 0.995f * dcY1;
-        dcX1 = referenceMic;
-        dcY1 = x;
+        lastRawReference = referenceMic;
 
+        // Critical safety boundary: only 15-600 Hz reaches prediction or adaptation.
+        float x = referenceBand.process(referenceMic);
         referenceHistory[referencePos] = x;
         samplesSeen++;
 
-        // Once x[n] arrives, train a model that predicted it from x[n-H ...].
         if (samplesSeen > horizonSamples + PREDICTOR_TAPS) {
             if (++predictorAdaptCounter >= PREDICTOR_ADAPT_DECIMATION) {
                 predictorAdaptCounter = 0;
@@ -147,39 +139,34 @@ public final class HeadphoneFeedforwardFxNlms {
             }
         }
 
-        // Direct estimate of x[n+H] from the current microphone history.
         float predictedFuture = samplesSeen > horizonSamples + PREDICTOR_TAPS
                 ? dotCircular(predictorWeights, referenceHistory, referencePos)
                 : 0f;
 
-        // Bound extrapolation to the recent measured level.
         float rms = (float)Math.sqrt(Math.max(signalPower, 1e-8f));
         float predictionLimit = Math.max(0.004f, Math.min(0.35f, 3.0f * rms));
         predictedFuture = clamp(predictedFuture, -predictionLimit, predictionLimit);
 
         confidenceSmooth = 0.998f * confidenceSmooth + 0.002f * confidence;
-
-        // Below ~5% measured predictive skill, keep the headphone drive near zero.
-        // By ~45% skill, allow the full calibrated controller response.
         float outputGate = smoothstep(0.05f, 0.45f, confidenceSmooth);
 
         predictedHistory[predictedPos] = predictedFuture;
-        float rawDrive = dotCircular(controllerWeights, predictedHistory, predictedPos);
-        float drive = clamp(rawDrive * outputGate, -outputCeiling, outputCeiling);
+        float rawDrive = dotCircular(controllerWeights, predictedHistory, predictedPos) * outputGate;
+
+        // Final independent HF guard. Clamp after filtering too in case of filter transient.
+        float drive = outputLowPass.process(clamp(rawDrive, -outputCeiling, outputCeiling));
+        drive = clamp(drive, -outputCeiling, outputCeiling);
         driveHistory[drivePos] = drive;
 
-        // Modelled cancellation and virtual ear residual.
         float predictedCancellation = convolveSecondary(driveHistory, drivePos);
         float predictedResidual = predictedFuture + predictedCancellation;
 
-        // FxNLMS reference filtered through the FIR part of the headphone path.
-        predictorPathHistory[pathPos] = predictedFuture;
+        // Filtered-X sees the same 600 Hz output-filter dynamics as the real drive path.
+        float predictedThroughOutputFilter = filteredXPathLowPass.process(predictedFuture);
+        predictorPathHistory[pathPos] = predictedThroughOutputFilter;
         float xf = convolveSecondary(predictorPathHistory, pathPos);
         filteredPredictedHistory[filteredPos] = xf;
 
-        // Slow bounded model refinement. The fixed floor is retained deliberately here:
-        // the calibrated inverse supplies the required bulk gain, while this update should
-        // not explode merely because a quiet reference produces a tiny filtered-X vector.
         float adaptGate = smoothstep(0.02f, 0.30f, confidenceSmooth);
         if (adaptGate > 0f) {
             float norm = 1e-5f;
@@ -236,7 +223,6 @@ public final class HeadphoneFeedforwardFxNlms {
             if (--p < 0) p = referenceHistory.length - 1;
         }
 
-        // Predictive skill = 1 - normalized MSE, smoothed over time.
         signalPower = 0.9995f * signalPower + 0.0005f * currentTarget * currentTarget;
         predictorErrorPower = 0.9995f * predictorErrorPower + 0.0005f * error * error;
         confidence = clamp(1f - predictorErrorPower / (signalPower + EPS), 0f, 1f);
@@ -247,7 +233,9 @@ public final class HeadphoneFeedforwardFxNlms {
     public float predictorConfidence() { return confidenceSmooth; }
     public int predictionHorizonSamples() { return horizonSamples; }
     public int inverseDelaySamples() { return inverseDelaySamples; }
+    public int outputFilterDelaySamples() { return outputFilterDelaySamples; }
 
+    public float diagnosticRawReference() { return lastRawReference; }
     public float diagnosticReference() { return lastReference; }
     public float diagnosticPredictedFuture() { return lastPredictedFuture; }
     public float diagnosticDrive() { return lastDrive; }
