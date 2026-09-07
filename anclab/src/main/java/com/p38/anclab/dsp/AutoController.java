@@ -18,6 +18,9 @@ public final class AutoController {
     private static final long SETTLE_MS = 650;
     private static final long ADAPT_INTERVAL_MS = 350;
     private static final double SEEK_STEP_HZ = 0.08;
+    private static final double FOLLOW_DEADBAND_HZ = 0.04;
+    private static final double CALIBRATION_RETUNE_HYSTERESIS_HZ = 0.28;
+    private static final double RUNNING_VERIFY_HYSTERESIS_HZ = 0.20;
 
     private Stage stage = Stage.IDLE;
     private long stageStartedMs;
@@ -104,20 +107,55 @@ public final class AutoController {
         command = command.clampMagnitude(this.maximumGain);
     }
 
+    /**
+     * Follow a measured/predicted tone without continuously invalidating an in-flight path probe.
+     * During BASELINE/PROBE/VERIFY calibration the controller holds its acoustic centre through small
+     * tracker jitter and only restarts once the requested move is large enough to represent a real
+     * retune. Once RUNNING, small motion is followed continuously; only a larger jump gets a settled
+     * verification state.
+     */
     public synchronized void followFrequency(double requestedHz, long nowMs) {
         requestedHz = clamp(requestedHz, 8.0, 200.0);
-        if (Math.abs(requestedHz - frequencyHz) < 0.04) return;
-        frequencyHz = requestedHz;
-        if (stage == Stage.RUNNING || stage == Stage.VERIFY_FINE) {
-            stage = Stage.FOLLOW_VERIFY;
-            stageStartedMs = nowMs;
-            status = String.format(Locale.US, "%s: following %.2f Hz…", label, frequencyHz);
-        } else if (stage != Stage.LISTENING && stage != Stage.IDLE) {
-            stage = Stage.BASELINE;
-            stageStartedMs = nowMs;
-            command = Complex.ZERO;
-            status = label + ": model moved during calibration; refreshing baseline…";
+        double delta = requestedHz - frequencyHz;
+        double distance = Math.abs(delta);
+        if (distance < FOLLOW_DEADBAND_HZ) return;
+
+        if (stage == Stage.RUNNING) {
+            frequencyHz = requestedHz;
+            if (distance >= RUNNING_VERIFY_HYSTERESIS_HZ) {
+                stage = Stage.FOLLOW_VERIFY;
+                stageStartedMs = nowMs;
+                status = String.format(Locale.US, "%s: following %.2f Hz…", label, frequencyHz);
+            }
+            return;
         }
+
+        if (stage == Stage.VERIFY_FINE || stage == Stage.FOLLOW_VERIFY) {
+            frequencyHz = requestedHz;
+            if (distance >= RUNNING_VERIFY_HYSTERESIS_HZ) {
+                stage = Stage.FOLLOW_VERIFY;
+                stageStartedMs = nowMs;
+                status = String.format(Locale.US, "%s: following %.2f Hz…", label, frequencyHz);
+            }
+            return;
+        }
+
+        if (stage == Stage.LISTENING || stage == Stage.IDLE) {
+            frequencyHz = requestedHz;
+            return;
+        }
+
+        if (distance < CALIBRATION_RETUNE_HYSTERESIS_HZ) {
+            // Hold the calibrated oscillator/analysis centre until this probe finishes. The caller
+            // must analyze the controller's output().frequencyHz(), not the raw tracker estimate.
+            return;
+        }
+
+        frequencyHz = requestedHz;
+        stage = Stage.BASELINE;
+        stageStartedMs = nowMs;
+        command = Complex.ZERO;
+        status = label + ": model moved materially; refreshing baseline…";
     }
 
     public synchronized Output update(SpectrumSnapshot snapshot, long nowMs) {
