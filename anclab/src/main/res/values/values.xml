@@ -1,0 +1,18 @@
+<resources>
+    <string name="app_name">ANC Lab</string>
+    <color name="anc_bg">#0B0B0C</color>
+    <color name="anc_surface">#1B1B1E</color>
+    <color name="anc_text">#F2F2F2</color>
+    <color name="anc_muted">#A8A8AD</color>
+    <color name="anc_accent">#79A7FF</color>
+    <color name="anc_warn">#FFB86C</color>
+    <color name="anc_good">#72D69C</color>
+    <style name="Theme.ANCLab" parent="android:style/Theme.Material.NoActionBar">
+        <item name="android:fontFamily">sans</item>
+        <item name="android:windowLightStatusBar">false</item>
+        <item name="android:statusBarColor">@color/anc_bg</item>
+        <item name="android:navigationBarColor">@color/anc_bg</item>
+        <item name="android:windowBackground">@color/anc_bg</item>
+        <item name="android:colorAccent">@color/anc_accent</item>
+    </style>
+</resources>
