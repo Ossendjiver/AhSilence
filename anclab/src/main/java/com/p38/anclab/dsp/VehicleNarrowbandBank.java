@@ -249,6 +249,11 @@ public final class VehicleNarrowbandBank {
                 shouldRun=false;controllable--;monitorOnly++;availabilityChanged=true;moved=true;
             }
             if(!shouldRun)continue;
+            if("IDLE".equals(l.controller.stageName())){
+                if(l.idleSinceMs==0)l.idleSinceMs=now;
+                if(FrequencyLanePolicy.controllerRetryDue(l.controller.stageName(),l.idleSinceMs,now))
+                    startTelemetryController(l,now);
+            }else l.idleSinceMs=0;
             l.controller.followFrequency(refined,now);
 
             double controlled=l.controller.output().frequencyHz();
@@ -331,6 +336,11 @@ public final class VehicleNarrowbandBank {
 
             double gain=0.0;
             if(l.cancellable){
+                if("IDLE".equals(l.controller.stageName())){
+                    if(l.idleSinceMs==0)l.idleSinceMs=now;
+                    if(FrequencyLanePolicy.controllerRetryDue(l.controller.stageName(),l.idleSinceMs,now))
+                        startDiscoveredController(l,now);
+                }else l.idleSinceMs=0;
                 double controlled=l.controller.output().frequencyHz();
                 SpectrumSnapshot exact=SpectrumAnalyzer.analyze(window,first,ANALYSIS_RATE,
                         Math.max(8.0,controlled-0.15),Math.min(200.0,controlled+0.15),controlled,l.referenceEpoch,l.referencePhase);
@@ -377,6 +387,7 @@ public final class VehicleNarrowbandBank {
         if(recipe==null)lane.controller.startTracking(now,perLaneLimit(),lane.currentFrequencyHz,lane.label,true);
         else lane.controller.startTrackingWithSecondaryPath(now,perLaneLimit(),lane.currentFrequencyHz,
                 lane.label,true,recipe.secondaryPath());
+        lane.idleSinceMs=0;lane.successUpdates=0;
     }
 
     private void startDiscoveredController(DiscoveredLane lane,long now){
@@ -385,6 +396,7 @@ public final class VehicleNarrowbandBank {
         if(recipe==null)lane.controller.startTracking(now,perLaneLimit(),lane.currentFrequencyHz,lane.label,false);
         else lane.controller.startTrackingWithSecondaryPath(now,perLaneLimit(),lane.currentFrequencyHz,
                 lane.label,false,recipe.secondaryPath());
+        lane.idleSinceMs=0;lane.successUpdates=0;
     }
 
     private void maybeCaptureRecipe(Lane lane,long now){
@@ -456,11 +468,11 @@ public final class VehicleNarrowbandBank {
     private float[] copyRing(){float[] out=new float[ringCount];int start=ringPos-ringCount;if(start<0)start+=ring.length;for(int i=0;i<ringCount;i++)out[i]=ring[(start+i)%ring.length];return out;}
 
     private static final class Lane {
-        final MechanicalFrequency model;final String label;final AutoController controller=new AutoController();final AdaptiveFrequencyTracker tracker=new AdaptiveFrequencyTracker();final Oscillator oscillator=new Oscillator();long referenceEpoch;double referencePhase;double currentFrequencyHz,predictedFrequencyHz;boolean available,cancellable,suppressed,controllerEnabled;int successUpdates;long lastRecipeMs;
+        final MechanicalFrequency model;final String label;final AutoController controller=new AutoController();final AdaptiveFrequencyTracker tracker=new AdaptiveFrequencyTracker();final Oscillator oscillator=new Oscillator();long referenceEpoch;double referencePhase;double currentFrequencyHz,predictedFrequencyHz;boolean available,cancellable,suppressed,controllerEnabled;int successUpdates;long lastRecipeMs,idleSinceMs;
         Lane(MechanicalFrequency model,double f){this.model=model;label=model.name();currentFrequencyHz=f;oscillator.frequencyHz=f;oscillator.targetFrequencyHz=f;}
     }
     private static final class DiscoveredLane {
-        final String id,label;final double anchorFrequencyHz;final AutoController controller=new AutoController();final AdaptiveFrequencyTracker tracker=new AdaptiveFrequencyTracker();final Oscillator oscillator=new Oscillator();long referenceEpoch;double referencePhase;double currentFrequencyHz;long lastStrongMs,lastRecipeMs;boolean cancellable;int successUpdates;
+        final String id,label;final double anchorFrequencyHz;final AutoController controller=new AutoController();final AdaptiveFrequencyTracker tracker=new AdaptiveFrequencyTracker();final Oscillator oscillator=new Oscillator();long referenceEpoch;double referencePhase;double currentFrequencyHz;long lastStrongMs,lastRecipeMs,idleSinceMs;boolean cancellable;int successUpdates;
         DiscoveredLane(String id,double f,long now){this.id=id;label=String.format(Locale.US,"Auto %.1f Hz",f);anchorFrequencyHz=f;currentFrequencyHz=f;lastStrongMs=now;oscillator.frequencyHz=f;oscillator.targetFrequencyHz=f;tracker.setBounds(Math.max(8.0,f-DISCOVERY_TRACK_HALF_WIDTH_HZ),Math.min(200.0,f+DISCOVERY_TRACK_HALF_WIDTH_HZ));}
     }
     private record DiscoveryResult(boolean moved,int cancelling) { }

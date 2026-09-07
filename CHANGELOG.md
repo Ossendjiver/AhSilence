@@ -14,10 +14,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Flush learned observations when ANC stops so a short successful run is not lost between periodic writes.
 - Keep frequencies below the conservatively supported vehicle output band monitor-only while retaining 8–200 Hz analysis and logging.
 - Coalesce telemetry lanes as well as discovered lanes when microphone refinement makes them converge on one physical tone.
+- Retry a still-strong lane after an eight-second muted pause if its first conservative path probe was rejected, rather than leaving it permanently idle while it occupies a lane slot.
 
 ### Tests
 - Added warm-path phase, additive recipe aggregation, route isolation, monitor-only band and collision-policy regressions.
-- The complete JVM-testable ANC Lab suite passes 21 tests.
+- The complete JVM-testable ANC Lab suite passes 22 tests.
 
 ## [0.5.8-rebuild] — 2026-09-07
 
