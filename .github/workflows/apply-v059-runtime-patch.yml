@@ -1,0 +1,33 @@
+name: Apply ANC Lab v0.5.9 runtime patch
+
+on:
+  push:
+    branches:
+      - feature/anc-lab-v059
+    paths:
+      - 'tools/apply_v059_runtime_patch.py'
+      - '.github/workflows/apply-v059-runtime-patch.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feature/anc-lab-v059
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Apply reviewed source migration
+        run: python tools/apply_v059_runtime_patch.py
+      - name: Commit source changes
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add anclab .github/workflows/build-anclab.yml
+          git commit -m "ANC Lab 0.5.9: improve fallback acquisition and observation paths"
+          git push origin HEAD:feature/anc-lab-v059
