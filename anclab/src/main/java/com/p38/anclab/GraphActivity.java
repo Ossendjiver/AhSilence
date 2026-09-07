@@ -40,18 +40,16 @@ public final class GraphActivity extends Activity {
         scroll.addView(root);
         setContentView(scroll);
 
-        TextView title = text("HEADPHONE ANC · LIVE GRAPH",24,Color.WHITE);
-        root.addView(title);
+        root.addView(text("HEADPHONE ANC · LIVE GRAPH",24,Color.WHITE));
         root.addView(text("Phone microphone = external reference only. Predicted cancellation and predicted ear output are modelled from the stored headphone calibration; they are not measured inside the ear.",12,Color.rgb(255,184,108)));
 
         graph = new WaveGraph();
         root.addView(graph,new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT,dp(360)));
 
-        CheckBox reference = traceToggle("Reference input · measured phone mic",true,0);
-        CheckBox drive = traceToggle("Cancellation drive · sent to headphones",true,1);
-        CheckBox predicted = traceToggle("Predicted cancellation at ear · modelled",true,2);
-        CheckBox residual = traceToggle("Predicted ear output · modelled residual",true,3);
-        root.addView(reference);root.addView(drive);root.addView(predicted);root.addView(residual);
+        root.addView(traceToggle("Reference input · measured phone mic",true,0));
+        root.addView(traceToggle("Cancellation drive · sent to headphones",true,1));
+        root.addView(traceToggle("Predicted cancellation at ear · modelled",true,2));
+        root.addView(traceToggle("Predicted ear output · modelled residual",true,3));
 
         stats = text("Waiting for ANC data…",12,Color.rgb(170,170,175));
         root.addView(stats);
@@ -71,7 +69,7 @@ public final class GraphActivity extends Activity {
             graph.setSnapshot(s);
             float ms = s.sampleRateHz <= 0 ? 0f : (s.reference.length * 1000f / s.sampleRateHz);
             stats.setText(String.format(Locale.US,
-                    "%s · %d points · %.0f Hz graph rate · %.1f ms window\nInput RMS %.5f · drive RMS %.5f",
+                    "%s · %d points · %.0f Hz graph rate · %.1f ms window\nReference RMS %.5f · drive RMS %.5f",
                     s.running?"ANC RUNNING":"ANC STOPPED",s.reference.length,s.sampleRateHz,ms,
                     rt.audio.getInputRms(),rt.audio.getOutputRms()));
             handler.postDelayed(this,50);
@@ -87,7 +85,7 @@ public final class GraphActivity extends Activity {
         private final Paint grid = new Paint(Paint.ANTI_ALIAS_FLAG);
         private final Paint[] paints = new Paint[4];
         private final boolean[] enabled = new boolean[]{true,true,true,true};
-        private AudioEngine.GraphSnapshot snap = new AudioEngine.GraphSnapshot(new float[0],new float[0],new float[0],new float[0],2000f,false);
+        private AudioEngine.GraphSnapshot snap;
 
         WaveGraph(){
             super(GraphActivity.this);
@@ -106,6 +104,7 @@ public final class GraphActivity extends Activity {
             c.drawLine(0,h/2f,w,h/2f,grid);
             for(int i=1;i<4;i++)c.drawLine(0,h*i/4f,w,h*i/4f,grid);
             for(int i=1;i<6;i++)c.drawLine(w*i/6f,0,w*i/6f,h,grid);
+            if(snap==null)return;
 
             float[][] series = new float[][]{snap.reference,snap.drive,snap.predictedCancellation,snap.predictedResidual};
             float peak=0.02f;
