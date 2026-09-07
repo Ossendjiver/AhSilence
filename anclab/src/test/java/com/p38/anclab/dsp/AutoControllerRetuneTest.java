@@ -19,9 +19,9 @@ public class AutoControllerRetuneTest {
         AutoController controller = new AutoController();
         controller.startTracking(0, 0.02, 34.5, "Auto 34.5 Hz", false);
 
-        controller.followFrequency(34.90, 100);
+        controller.followFrequency(35.10, 100);
 
         assertEquals("BASELINE", controller.stageName());
-        assertEquals(34.9, controller.output().frequencyHz(), 1.0e-9);
+        assertEquals(35.1, controller.output().frequencyHz(), 1.0e-9);
     }
 }

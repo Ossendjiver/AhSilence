@@ -16,6 +16,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Coalesce telemetry lanes as well as discovered lanes when microphone refinement makes them converge on one physical tone.
 - Retry a still-strong lane after an eight-second muted pause if its first conservative path probe was rejected, rather than leaving it permanently idle while it occupies a lane slot.
 - When fine adaptation repeatedly rejects a changing disturbance, retain the verified speaker path and half-strength-check a freshly inferred command instead of restarting baseline/path calibration.
+- Hold an in-flight bounded lane calibration through up to 0.55 Hz of tracker motion, avoiding repeated baseline restarts while the controller is still inside its admitted physical neighbourhood.
 
 ### Tests
 - Added warm-path phase, additive recipe aggregation, route isolation, monitor-only band and collision-policy regressions.

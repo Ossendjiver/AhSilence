@@ -19,7 +19,7 @@ public final class AutoController {
     private static final long ADAPT_INTERVAL_MS = 350;
     private static final double SEEK_STEP_HZ = 0.08;
     private static final double FOLLOW_DEADBAND_HZ = 0.04;
-    private static final double CALIBRATION_RETUNE_HYSTERESIS_HZ = 0.28;
+    private static final double CALIBRATION_RETUNE_HYSTERESIS_HZ = 0.55;
     private static final double RUNNING_VERIFY_HYSTERESIS_HZ = 0.20;
 
     private Stage stage = Stage.IDLE;
