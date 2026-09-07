@@ -19,8 +19,9 @@ import java.util.Locale;
  * If no configured telemetry lane can currently be predicted, the bank automatically scans the
  * selected microphone for persistent 8-200 Hz spectral lines. A candidate must survive independent
  * scans before it is allowed to become a cancellation lane. These discovered lanes are therefore
- * narrow, conservative and self-expiring rather than speculative broadband cancellation. Once
- * telemetry becomes usable again the fallback lanes are retired and the physical models resume.
+ * narrow, conservative and self-expiring rather than speculative broadband cancellation. Each
+ * fallback lane is anchored to the physical neighbourhood in which it was admitted, and lanes that
+ * later converge onto the same physical tone are coalesced instead of competing for it.
  *
  * Speculative broadband remains outside this class and receives notched microphone audio. Both
  * telemetry-owned and fallback-discovered frequencies are returned by frequenciesHz(), so the
@@ -38,8 +39,10 @@ public final class VehicleNarrowbandBank {
     private static final int DISCOVERY_SCAN_EVERY_ANALYSES=5; // ~2 scans/s
     private static final int MAX_DISCOVERED_LANES=6;
     private static final double DISCOVERY_SEARCH_HALF_WIDTH_HZ=0.85;
+    private static final double DISCOVERY_TRACK_HALF_WIDTH_HZ=0.70;
     private static final double DISCOVERY_MIN_SEPARATION_HZ=1.25;
     private static final double DISCOVERY_DUPLICATE_RADIUS_HZ=1.0;
+    private static final double DISCOVERY_COLLISION_RADIUS_HZ=0.85;
     private static final long DISCOVERY_INACTIVE_STALE_MS=8000;
 
     private final ButterworthLowPass analysisLowPass=new ButterworthLowPass(SAMPLE_RATE,210.0);
@@ -69,8 +72,15 @@ public final class VehicleNarrowbandBank {
 
     public synchronized double[] frequenciesHz(){
         List<Double> out=new ArrayList<>();
-        for(Lane l:lanes)if(l.available&&Double.isFinite(l.currentFrequencyHz)&&l.currentFrequencyHz>=8&&l.currentFrequencyHz<=200)out.add(l.currentFrequencyHz);
-        for(DiscoveredLane l:discovered)if(Double.isFinite(l.currentFrequencyHz)&&l.currentFrequencyHz>=8&&l.currentFrequencyHz<=200)out.add(l.currentFrequencyHz);
+        for(Lane l:lanes){
+            if(!l.available)continue;
+            double f=l.controller.output().frequencyHz();
+            if(Double.isFinite(f)&&f>=8&&f<=200)out.add(f);
+        }
+        for(DiscoveredLane l:discovered){
+            double f=l.controller.output().frequencyHz();
+            if(Double.isFinite(f)&&f>=8&&f<=200)out.add(f);
+        }
         double[] f=new double[out.size()];for(int i=0;i<f.length;i++)f[i]=out.get(i);return f;
     }
     public long frequencyRevision(){return frequencyRevision;}
@@ -187,8 +197,9 @@ public final class VehicleNarrowbandBank {
             if(Math.abs(refined-l.currentFrequencyHz)>0.025){l.currentFrequencyHz=refined;moved=true;}
             l.controller.followFrequency(refined,now);
 
+            double controlled=l.controller.output().frequencyHz();
             SpectrumSnapshot exact=SpectrumAnalyzer.analyze(window,first,ANALYSIS_RATE,
-                    Math.max(8.0,refined-0.15),Math.min(200.0,refined+0.15),refined,l.referenceEpoch,l.referencePhase);
+                    Math.max(8.0,controlled-0.15),Math.min(200.0,controlled+0.15),controlled,l.referenceEpoch,l.referencePhase);
             l.controller.update(exact,now);
             if(l.controller.output().gain()>1e-5)cancelling++;
         }
@@ -252,8 +263,9 @@ public final class VehicleNarrowbandBank {
                 l.controller.followFrequency(refined,now);
             }
 
+            double controlled=l.controller.output().frequencyHz();
             SpectrumSnapshot exact=SpectrumAnalyzer.analyze(window,first,ANALYSIS_RATE,
-                    Math.max(8.0,refined-0.15),Math.min(200.0,refined+0.15),refined,l.referenceEpoch,l.referencePhase);
+                    Math.max(8.0,controlled-0.15),Math.min(200.0,controlled+0.15),controlled,l.referenceEpoch,l.referencePhase);
             l.controller.update(exact,now);
             double gain=l.controller.output().gain();
             if(gain>1e-5)cancelling++;
@@ -262,13 +274,37 @@ public final class VehicleNarrowbandBank {
                 l.controller.stop();iterator.remove();moved=true;changed=true;
             }
         }
-        if(changed)redistributeLimits();
+
+        if(mergeDiscoveredCollisions()){moved=true;changed=true;}
+        if(changed){
+            redistributeLimits();
+            cancelling=0;for(DiscoveredLane l:discovered)if(l.controller.output().gain()>1e-5)cancelling++;
+        }
         return new DiscoveryResult(moved,cancelling);
     }
 
+    /** Keep the older lane when independent admissions converge onto one physical tone. */
+    private boolean mergeDiscoveredCollisions(){
+        boolean merged=false;
+        for(int i=0;i<discovered.size();i++){
+            DiscoveredLane keep=discovered.get(i);
+            for(int j=i+1;j<discovered.size();){
+                DiscoveredLane other=discovered.get(j);
+                double keepHz=keep.controller.output().frequencyHz();
+                double otherHz=other.controller.output().frequencyHz();
+                if(Math.abs(keepHz-otherHz)<DISCOVERY_COLLISION_RADIUS_HZ){
+                    other.controller.stop();
+                    discovered.remove(j);
+                    merged=true;
+                }else j++;
+            }
+        }
+        return merged;
+    }
+
     private boolean nearOwnedFrequency(double hz){
-        for(Lane l:lanes)if(l.available&&Math.abs(l.currentFrequencyHz-hz)<DISCOVERY_DUPLICATE_RADIUS_HZ)return true;
-        for(DiscoveredLane l:discovered)if(Math.abs(l.currentFrequencyHz-hz)<DISCOVERY_DUPLICATE_RADIUS_HZ)return true;
+        for(Lane l:lanes)if(l.available&&Math.abs(l.controller.output().frequencyHz()-hz)<DISCOVERY_DUPLICATE_RADIUS_HZ)return true;
+        for(DiscoveredLane l:discovered)if(Math.abs(l.controller.output().frequencyHz()-hz)<DISCOVERY_DUPLICATE_RADIUS_HZ)return true;
         return false;
     }
 
@@ -305,8 +341,8 @@ public final class VehicleNarrowbandBank {
         Lane(MechanicalFrequency model,double f){this.model=model;label=model.name();currentFrequencyHz=f;oscillator.frequencyHz=f;oscillator.targetFrequencyHz=f;}
     }
     private static final class DiscoveredLane {
-        final String id,label;final AutoController controller=new AutoController();final AdaptiveFrequencyTracker tracker=new AdaptiveFrequencyTracker();final Oscillator oscillator=new Oscillator();long referenceEpoch;double referencePhase;double currentFrequencyHz;long lastStrongMs;
-        DiscoveredLane(String id,double f,long now){this.id=id;label=String.format(Locale.US,"Auto %.1f Hz",f);currentFrequencyHz=f;lastStrongMs=now;oscillator.frequencyHz=f;oscillator.targetFrequencyHz=f;}
+        final String id,label;final double anchorFrequencyHz;final AutoController controller=new AutoController();final AdaptiveFrequencyTracker tracker=new AdaptiveFrequencyTracker();final Oscillator oscillator=new Oscillator();long referenceEpoch;double referencePhase;double currentFrequencyHz;long lastStrongMs;
+        DiscoveredLane(String id,double f,long now){this.id=id;label=String.format(Locale.US,"Auto %.1f Hz",f);anchorFrequencyHz=f;currentFrequencyHz=f;lastStrongMs=now;oscillator.frequencyHz=f;oscillator.targetFrequencyHz=f;tracker.setBounds(Math.max(8.0,f-DISCOVERY_TRACK_HALF_WIDTH_HZ),Math.min(200.0,f+DISCOVERY_TRACK_HALF_WIDTH_HZ));}
     }
     private record DiscoveryResult(boolean moved,int cancelling) { }
     private static final class Oscillator {double phase=0,frequencyHz=0,targetFrequencyHz=0,real=0,imag=0,targetReal=0,targetImag=0;}
