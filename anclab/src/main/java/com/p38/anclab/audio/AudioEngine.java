@@ -93,7 +93,7 @@ public final class AudioEngine {
             int firLen=128;float[] h=new float[firLen],xh=new float[firLen];int xp=0;float mu=0.35f;int nFit=Math.min(probeLen-256,total-lead-bestLag-256);
             for(int n=0;n<nFit;n++){float x=probe[lead+n];xh[xp]=x;float yh=0,norm=1e-7f;int p=xp;for(int k=0;k<firLen;k++){yh+=h[k]*xh[p];norm+=xh[p]*xh[p];if(--p<0)p=firLen-1;}float target=captured[lead+bestLag+n];float e=target-yh;float step=mu*e/norm;p=xp;for(int k=0;k<firLen;k++){h[k]+=step*xh[p];if(--p<0)p=firLen-1;}if(++xp==firLen)xp=0;}
             HeadphoneCalibration c=new HeadphoneCalibration();c.sampleRateHz=SAMPLE_RATE;c.inputDeviceId=inputDeviceId;c.outputDeviceId=outputDeviceId;c.inputRoute=inputRoute;c.outputRoute=outputRoute;c.delaySamples=bestLag;c.quality=(float)best;c.utcMs=System.currentTimeMillis();c.secondaryPath=h;c.safeOutputCeiling=bestLag>2400?0.12f:0.22f;calibration=c;saveCalibrationWavs(probe,captured);
-            AppLog.i(TAG,"Headphone calibration complete delay="+bestLag+" samples quality="+best+" signedCorr="+bestSigned);
+            AppLog.i(TAG,"Headphone calibration complete delay="+bestLag+" samples quality="+best+" signedCorr="+bestSigned+" firTaps="+firLen);
             return new CalibrationResult(true,c,"Calibration complete");
         }catch(Exception e){lastError=e.getMessage();AppLog.e(TAG,"Calibration failed",e);return new CalibrationResult(false,null,"Calibration failed: "+e.getMessage());}
     }
@@ -103,10 +103,17 @@ public final class AudioEngine {
     @SuppressLint("MissingPermission")
     public synchronized boolean startHeadphoneAnc(){
         if(running.get())return true;if(calibration==null){lastError="No stored headphone calibration";return false;}
-        try{record=buildRecord();track=buildTrack();if(record==null||track==null)throw new IllegalStateException("Could not open selected audio route");fx=new FeedbackFxNlms(calibration.secondaryPath,calibration.delaySamples,96,calibration.safeOutputCeiling);fx.setAdaptationRate(calibration.delaySamples>2400?0.018f:0.055f);record.startRecording();track.play();running.set(true);if(monitorLogEnabled)monitoringLog.start();worker=new Thread(this::runLoop,"ANC-Lab-Audio");worker.setPriority(Thread.MAX_PRIORITY);worker.start();AppLog.i(TAG,"Headphone feedback FxNLMS started on "+outputRoute);return true;}catch(Exception e){lastError=e.getMessage();AppLog.e(TAG,"Start failed",e);stop();return false;}
+        try{
+            record=buildRecord();track=buildTrack();if(record==null||track==null)throw new IllegalStateException("Could not open selected audio route");
+            fx=new FeedbackFxNlms(calibration.secondaryPath,calibration.delaySamples,FeedbackFxNlms.CONTROLLER_TAPS,calibration.safeOutputCeiling);
+            fx.setAdaptationRate(calibration.delaySamples>2400?0.018f:0.055f);
+            record.startRecording();track.play();running.set(true);if(monitorLogEnabled)monitoringLog.start();worker=new Thread(this::runLoop,"ANC-Lab-Audio");worker.setPriority(Thread.MAX_PRIORITY);worker.start();
+            AppLog.i(TAG,"Headphone broadband 128-tap feedback FxNLMS started on "+outputRoute+" delaySamples="+calibration.delaySamples+" secondaryTaps="+(calibration.secondaryPath==null?0:calibration.secondaryPath.length));
+            return true;
+        }catch(Exception e){lastError=e.getMessage();AppLog.e(TAG,"Start failed",e);stop();return false;}
     }
 
-    private void runLoop(){int block=192;float[] in=new float[block],out=new float[block];while(running.get()){int n=record.read(in,0,block,AudioRecord.READ_BLOCKING);if(n<=0)continue;for(int i=0;i<n;i++)out[i]=fx.process(in[i]);int w=track.write(out,0,n,AudioTrack.WRITE_BLOCKING);inputRms=fx.inputRms();outputRms=fx.outputRms();recorder.onAudio(in,out,n);monitoringLog.sample(System.currentTimeMillis(),inputRms,outputRms,"HEADPHONE_FXNLMS",inputRoute,outputRoute);if(w<0){lastError="AudioTrack write error "+w;break;}}running.set(false);}
+    private void runLoop(){int block=192;float[] in=new float[block],out=new float[block];while(running.get()){int n=record.read(in,0,block,AudioRecord.READ_BLOCKING);if(n<=0)continue;for(int i=0;i<n;i++)out[i]=fx.process(in[i]);int w=track.write(out,0,n,AudioTrack.WRITE_BLOCKING);inputRms=fx.inputRms();outputRms=fx.outputRms();recorder.onAudio(in,out,n);monitoringLog.sample(System.currentTimeMillis(),inputRms,outputRms,"HEADPHONE_BROADBAND_FXNLMS_128",inputRoute,outputRoute);if(w<0){lastError="AudioTrack write error "+w;break;}}running.set(false);}
 
     public synchronized void stop(){running.set(false);if(worker!=null&&worker!=Thread.currentThread()){try{worker.join(600);}catch(Exception ignored){}}worker=null;try{if(record!=null){record.stop();record.release();}}catch(Exception ignored){}try{if(track!=null){track.pause();track.flush();track.stop();track.release();}}catch(Exception ignored){}record=null;track=null;monitoringLog.stop();if(recorder.isActive())recorder.stop();inputRms=outputRms=0f;}
     public boolean startRecording(){return recorder.start(SAMPLE_RATE);}public void stopRecording(){recorder.stop();}public boolean isRecording(){return recorder.isActive();}
