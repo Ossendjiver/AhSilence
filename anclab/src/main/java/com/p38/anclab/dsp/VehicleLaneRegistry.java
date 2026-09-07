@@ -6,7 +6,8 @@ import java.util.Locale;
 /** Process-wide read-only snapshot of the vehicle narrowband lanes for UI/media surfaces. */
 public final class VehicleLaneRegistry {
     public record Lane(String id,String label,double frequencyHz,double gain,double phaseDegrees,
-                       String stage,String status,double improvementDb,boolean discovered) { }
+                       String stage,String status,double improvementDb,boolean discovered,
+                       boolean monitorOnly) { }
 
     private static volatile List<Lane> lanes=List.of();
     private static volatile long updatedMs=0L;
@@ -27,7 +28,7 @@ public final class VehicleLaneRegistry {
         for(Lane l:snapshot){
             if(i++>0)b.append('\n');
             String prefix=l.discovered()?"Discovered ":"Mechanical ";
-            String state=l.gain()>1e-5?"running":prettyStage(l.stage());
+            String state=l.monitorOnly()?"monitor only":l.gain()>1e-5?"running":prettyStage(l.stage());
             b.append(prefix).append(i).append(" · ")
                     .append(String.format(Locale.US,"%.2f Hz · %.2f%% · %s",l.frequencyHz(),l.gain()*100.0,state));
             if(Double.isFinite(l.improvementDb())&&l.gain()>1e-5)

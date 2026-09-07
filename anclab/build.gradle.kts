@@ -10,8 +10,8 @@ android {
         applicationId = "com.p38.anclab"
         minSdk = 26
         targetSdk = 35
-        versionCode = 13
-        versionName = "0.5.8-rebuild"
+        versionCode = 14
+        versionName = "0.5.8.1-rebuild"
     }
 
     signingConfigs {

@@ -31,6 +31,8 @@ public final class AutoController {
     private Complex command = Complex.ZERO;
     private Complex previousCommand = Complex.ZERO;
     private Complex recipeCommand = Complex.ZERO;
+    private Complex learnedSecondaryPath = Complex.ZERO;
+    private boolean usingLearnedSecondaryPath;
     private Complex positiveProbeCommand = Complex.ZERO;
     private Complex positiveProbeResidual = Complex.ZERO;
     private double previousResidual = Double.POSITIVE_INFINITY;
@@ -76,6 +78,22 @@ public final class AutoController {
                 ? label + ": checking learned recipe…" : label + ": measuring baseline…";
     }
 
+    /**
+     * Reuses a verified speaker-to-microphone path, never a prior anti-noise phase. The current
+     * disturbance phase is measured first and the calculated command is verified at half strength.
+     */
+    public synchronized void startTrackingWithSecondaryPath(long nowMs, double maximumGain,
+                                                              double frequencyHz, String label,
+                                                              boolean fixedByTelemetry,
+                                                              Complex storedSecondaryPath) {
+        configure(nowMs, maximumGain, frequencyHz, fixedByTelemetry, label);
+        if (storedSecondaryPath != null && storedSecondaryPath.magnitude() >= 1.0e-5)
+            learnedSecondaryPath = storedSecondaryPath;
+        stage = Stage.BASELINE;
+        status = learnedSecondaryPath.magnitude() > 0
+                ? label + ": measuring baseline for learned path…" : label + ": measuring baseline…";
+    }
+
     private void configure(long nowMs, double maximumGain, double frequencyHz,
                            boolean fixedTarget, String label) {
         this.maximumGain = clamp(maximumGain, 0.0001, 0.15);
@@ -88,6 +106,8 @@ public final class AutoController {
         baseline = Complex.ZERO;
         secondaryPath = Complex.ZERO;
         recipeCommand = Complex.ZERO;
+        learnedSecondaryPath = Complex.ZERO;
+        usingLearnedSecondaryPath = false;
         positiveProbeCommand = Complex.ZERO;
         positiveProbeResidual = Complex.ZERO;
         previousResidual = Double.POSITIVE_INFINITY;
@@ -151,6 +171,7 @@ public final class AutoController {
             return;
         }
 
+        if (secondaryPath.magnitude() >= 1.0e-5) learnedSecondaryPath = secondaryPath;
         frequencyHz = requestedHz;
         stage = Stage.BASELINE;
         stageStartedMs = nowMs;
@@ -197,6 +218,19 @@ public final class AutoController {
         if (elapsed(nowMs) < SETTLE_MS || !targetMatches(snapshot)) return;
         baseline = snapshot.targetComplex();
         baselineResidual = baseline.magnitude();
+        if (learnedSecondaryPath.magnitude() >= 1.0e-5) {
+            secondaryPath = learnedSecondaryPath;
+            learnedSecondaryPath = Complex.ZERO;
+            usingLearnedSecondaryPath = true;
+            previousCommand = Complex.ZERO;
+            previousResidual = baselineResidual;
+            command = baseline.negate().divide(secondaryPath)
+                    .clampMagnitude(maximumGain).multiply(0.5);
+            stage = Stage.VERIFY_HALF;
+            stageStartedMs = nowMs;
+            status = label + ": validating learned path at half strength…";
+            return;
+        }
         if (recipeCommand.magnitude() > 0) {
             command = recipeCommand;
             stage = Stage.VERIFY_RECIPE;
@@ -276,6 +310,12 @@ public final class AutoController {
         if (elapsed(nowMs) < SETTLE_MS || !targetMatches(snapshot)) return;
         double residual = snapshot.targetComplex().magnitude();
         if (residual > baselineResidual * 1.03) {
+            if (usingLearnedSecondaryPath) {
+                usingLearnedSecondaryPath = false;
+                command = Complex.ZERO;
+                beginProbe(nowMs);
+                return;
+            }
             reject("trial became louder");
             return;
         }
@@ -295,9 +335,16 @@ public final class AutoController {
             residual = previousResidual;
         }
         if (residual >= baselineResidual * 0.99) {
+            if (usingLearnedSecondaryPath) {
+                usingLearnedSecondaryPath = false;
+                command = Complex.ZERO;
+                beginProbe(nowMs);
+                return;
+            }
             reject("no repeatable reduction");
             return;
         }
+        usingLearnedSecondaryPath = false;
         previousResidual = residual;
         previousCommand = command;
         stage = Stage.RUNNING;
@@ -421,6 +468,8 @@ public final class AutoController {
     public synchronized String stageName() { return stage.name(); }
     public synchronized String label() { return label; }
     public synchronized double currentImprovementDb() { return currentImprovementDb; }
+    public synchronized Complex secondaryPathEstimate() { return secondaryPath; }
+    public synchronized boolean hasUsableSecondaryPathEstimate() { return secondaryPath.magnitude() >= 1.0e-5; }
     private boolean targetMatches(SpectrumSnapshot snapshot) { return Math.abs(snapshot.targetFrequencyHz() - frequencyHz) < 0.035; }
     private long elapsed(long nowMs) { return nowMs - stageStartedMs; }
 

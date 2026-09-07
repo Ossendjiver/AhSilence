@@ -74,6 +74,42 @@ public final class ProfileStore {
     public boolean loadSpeculativeBroadband(String profileId) {try {JSONObject o=new JSONObject(storage.readText("profiles/"+normalizeProfile(profileId)+"/runtime_settings.json"));return o.optBoolean("speculativeBroadband",false);} catch (Exception e) { return false; }}
     public void saveSpeculativeBroadband(String profileId,boolean enabled) {updateRuntimeSetting(profileId,"speculativeBroadband",enabled);}
 
+    /** Loads append-only vehicle path observations; VehicleRecipeBook combines repeated runs. */
+    public List<VehicleCancellationRecipe> loadCancellationRecipes(String profileId) {
+        String p=normalizeProfile(profileId);List<VehicleCancellationRecipe> result=new ArrayList<>();
+        if(!storage.isConnected()||PROFILE_HEADPHONES.equals(p))return result;
+        String raw=storage.readText("recipes/"+p+".jsonl");if(raw==null||raw.isBlank())return result;
+        for(String line:raw.split("\\R")){
+            if(line.isBlank())continue;
+            try{
+                JSONObject o=new JSONObject(line);
+                String route=o.optString("routeKey",""),model=o.optString("modelId","");
+                MechanicalFrequency.SourceType type=MechanicalFrequency.SourceType.parse(o.optString("sourceType","FIXED"));
+                double sourceBin=o.optDouble("sourceBin",Double.NaN),frequency=o.optDouble("frequencyHz",Double.NaN);
+                double real=o.optDouble("secondaryReal",Double.NaN),imag=o.optDouble("secondaryImag",Double.NaN);
+                if(route.isEmpty()||model.isEmpty()||!Double.isFinite(sourceBin)||!Double.isFinite(frequency)
+                        ||!Double.isFinite(real)||!Double.isFinite(imag))continue;
+                result.add(new VehicleCancellationRecipe(route,model,type,sourceBin,frequency,real,imag,
+                        o.optDouble("improvementDb",0),o.optInt("observations",1),o.optLong("updatedUtcMs",0)));
+            }catch(Exception ignored){ }
+        }
+        return result;
+    }
+
+    /** Saves one verified secondary-path observation without deleting earlier learning. */
+    public boolean appendCancellationRecipe(String profileId,VehicleCancellationRecipe recipe) {
+        if(recipe==null||!storage.isConnected())return false;String p=normalizeProfile(profileId);
+        try{
+            JSONObject o=new JSONObject();o.put("format","anc-lab-vehicle-path-recipe-v2");
+            o.put("profile",p);o.put("routeKey",recipe.routeKey());o.put("modelId",recipe.modelId());
+            o.put("sourceType",recipe.sourceType().name());o.put("sourceBin",recipe.sourceBin());
+            o.put("frequencyHz",recipe.frequencyHz());o.put("secondaryReal",recipe.secondaryReal());
+            o.put("secondaryImag",recipe.secondaryImag());o.put("improvementDb",recipe.improvementDb());
+            o.put("observations",recipe.observations());o.put("updatedUtcMs",recipe.updatedUtcMs());
+            return storage.appendText("recipes/"+p+".jsonl",o.toString()+"\n");
+        }catch(Exception e){AppLog.e(TAG,"Could not save cancellation recipe",e);return false;}
+    }
+
     private void updateRuntimeSetting(String profileId,String key,Object value) {if (!storage.isConnected()) return;String p=normalizeProfile(profileId), path="profiles/"+p+"/runtime_settings.json";JSONObject o;try { o=new JSONObject(storage.readText(path)); } catch (Exception e) { o=new JSONObject(); }try { o.put(key,value); } catch (Exception ignored) { }storage.writeJson(path,o.toString());}
 
     /** Parsed mechanical models used by live GPS/OBD prediction and acoustic learning. */

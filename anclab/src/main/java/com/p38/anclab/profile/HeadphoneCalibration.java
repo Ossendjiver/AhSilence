@@ -22,6 +22,9 @@ public final class HeadphoneCalibration {
     public long utcMs = 0L;
     public float[] secondaryPath = new float[0];
     public float safeOutputCeiling = 0.22f;
+    public float minimumCancellationHz = 20f;
+    public float maximumCancellationHz = 200f;
+    public boolean frequencyBandVerified = false;
 
     // -1 / NaN means a calibration created before volume metadata was added.
     public int mediaVolumeIndex = -1;
@@ -34,7 +37,7 @@ public final class HeadphoneCalibration {
     public JSONObject toJson() {
         JSONObject o = new JSONObject();
         try {
-            o.put("format", "anc-lab-route-calibration-v2");
+            o.put("format", "anc-lab-route-calibration-v3");
             o.put("sampleRateHz", sampleRateHz);
             o.put("inputDeviceId", inputDeviceId);
             o.put("outputDeviceId", outputDeviceId);
@@ -46,6 +49,9 @@ public final class HeadphoneCalibration {
             o.put("quality", quality);
             o.put("utcMs", utcMs);
             o.put("safeOutputCeiling", safeOutputCeiling);
+            o.put("minimumCancellationHz", minimumCancellationHz);
+            o.put("maximumCancellationHz", maximumCancellationHz);
+            o.put("frequencyBandVerified", frequencyBandVerified);
             if (mediaVolumeIndex >= 0) o.put("mediaVolumeIndex", mediaVolumeIndex);
             if (mediaVolumeMax >= 0) o.put("mediaVolumeMax", mediaVolumeMax);
             if (Float.isFinite(mediaVolumeDb)) o.put("mediaVolumeDb", mediaVolumeDb);
@@ -71,6 +77,9 @@ public final class HeadphoneCalibration {
             c.quality = (float)o.optDouble("quality", 0.0);
             c.utcMs = o.optLong("utcMs", 0L);
             c.safeOutputCeiling = (float)o.optDouble("safeOutputCeiling", 0.22);
+            c.minimumCancellationHz = (float)o.optDouble("minimumCancellationHz", 20.0);
+            c.maximumCancellationHz = (float)o.optDouble("maximumCancellationHz", 200.0);
+            c.frequencyBandVerified = o.optBoolean("frequencyBandVerified", false);
             c.mediaVolumeIndex = o.optInt("mediaVolumeIndex", -1);
             c.mediaVolumeMax = o.optInt("mediaVolumeMax", -1);
             c.mediaVolumeDb = o.has("mediaVolumeDb") ? (float)o.optDouble("mediaVolumeDb", Double.NaN) : Float.NaN;
