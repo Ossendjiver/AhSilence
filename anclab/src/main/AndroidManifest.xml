@@ -11,6 +11,7 @@
         android:label="ANC Lab"
         android:theme="@style/Theme.ANCLab"
         android:usesCleartextTraffic="false">
+        <activity android:name=".GraphActivity" android:exported="false" android:screenOrientation="portrait" />
         <activity android:name=".MainActivity" android:exported="true" android:screenOrientation="portrait">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
