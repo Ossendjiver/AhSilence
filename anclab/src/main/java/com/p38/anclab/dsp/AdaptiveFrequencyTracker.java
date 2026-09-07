@@ -4,6 +4,10 @@ package com.p38.anclab.dsp;
  * Lightweight two-model Kalman bank for a tone's frequency and drift rate.
  * A quiet model rejects jitter while an agile model follows a genuine speed/order change;
  * innovation likelihood blends the two estimates without a hard mode switch.
+ *
+ * Optional frequency bounds can be applied to microphone-discovered lanes so a tracker cannot
+ * random-walk from one physical spectral line into another. Telemetry-owned trackers remain
+ * unbounded unless their caller explicitly supplies bounds.
  */
 public final class AdaptiveFrequencyTracker {
     private static final double MIN_DT = 0.05;
@@ -14,10 +18,31 @@ public final class AdaptiveFrequencyTracker {
     private double quietProbability = 0.85;
     private long lastUpdateMs;
     private boolean initialized;
+    private double minimumHz = Double.NEGATIVE_INFINITY;
+    private double maximumHz = Double.POSITIVE_INFINITY;
+
+    public synchronized void setBounds(double minimumHz, double maximumHz) {
+        if (!Double.isFinite(minimumHz) || !Double.isFinite(maximumHz) || maximumHz <= minimumHz) {
+            clearBounds();
+            return;
+        }
+        this.minimumHz = minimumHz;
+        this.maximumHz = maximumHz;
+        if (initialized) {
+            boundModel(quiet);
+            boundModel(agile);
+        }
+    }
+
+    public synchronized void clearBounds() {
+        minimumHz = Double.NEGATIVE_INFINITY;
+        maximumHz = Double.POSITIVE_INFINITY;
+    }
 
     public synchronized void reset(double frequencyHz, long nowMs) {
-        quiet.reset(frequencyHz);
-        agile.reset(frequencyHz);
+        double bounded = clampFrequency(frequencyHz);
+        quiet.reset(bounded);
+        agile.reset(bounded);
         quietProbability = 0.85;
         lastUpdateMs = nowMs;
         initialized = true;
@@ -25,6 +50,7 @@ public final class AdaptiveFrequencyTracker {
 
     public synchronized double update(double measuredHz, long nowMs) {
         if (!Double.isFinite(measuredHz)) return estimateHz();
+        if (measuredHz < minimumHz || measuredHz > maximumHz) return estimateHz();
         if (!initialized) {
             reset(measuredHz, nowMs);
             return measuredHz;
@@ -34,6 +60,8 @@ public final class AdaptiveFrequencyTracker {
 
         quiet.predict(dt);
         agile.predict(dt);
+        boundModel(quiet);
+        boundModel(agile);
         double centre = estimateHz();
         double maximumInnovation = Math.max(1.2, 0.035 * Math.max(8.0, centre));
         if (Math.abs(measuredHz - centre) > maximumInnovation) return centre;
@@ -42,6 +70,8 @@ public final class AdaptiveFrequencyTracker {
         double agilePrior = 1.0 - quietPrior;
         double quietLikelihood = quiet.update(measuredHz, MEASUREMENT_VARIANCE);
         double agileLikelihood = agile.update(measuredHz, MEASUREMENT_VARIANCE);
+        boundModel(quiet);
+        boundModel(agile);
         double normalizer = quietPrior * quietLikelihood + agilePrior * agileLikelihood;
         if (normalizer > 1.0e-18) {
             quietProbability = quietPrior * quietLikelihood / normalizer;
@@ -52,7 +82,7 @@ public final class AdaptiveFrequencyTracker {
 
     public synchronized double estimateHz() {
         if (!initialized) return Double.NaN;
-        return quietProbability * quiet.frequency + (1.0 - quietProbability) * agile.frequency;
+        return clampFrequency(quietProbability * quiet.frequency + (1.0 - quietProbability) * agile.frequency);
     }
 
     public synchronized double driftHzPerSecond() {
@@ -61,6 +91,20 @@ public final class AdaptiveFrequencyTracker {
     }
 
     public synchronized double agileProbability() { return 1.0 - quietProbability; }
+
+    private double clampFrequency(double value) {
+        return Math.max(minimumHz, Math.min(maximumHz, value));
+    }
+
+    private void boundModel(Model model) {
+        if (model.frequency < minimumHz) {
+            model.frequency = minimumHz;
+            if (model.rate < 0) model.rate = 0;
+        } else if (model.frequency > maximumHz) {
+            model.frequency = maximumHz;
+            if (model.rate > 0) model.rate = 0;
+        }
+    }
 
     private static final class Model {
         final double processNoise;
