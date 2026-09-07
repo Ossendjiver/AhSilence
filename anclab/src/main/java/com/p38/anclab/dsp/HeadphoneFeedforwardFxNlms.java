@@ -18,7 +18,9 @@ public final class HeadphoneFeedforwardFxNlms {
     private final float[] secondary;
     private final HeadphoneBandLimiter referenceBand=new HeadphoneBandLimiter(SAMPLE_RATE,true);
     private final HeadphoneBandLimiter outputLowPass=new HeadphoneBandLimiter(SAMPLE_RATE,false);
+    private final HeadphoneBandLimiter secondaryObservationBand=new HeadphoneBandLimiter(SAMPLE_RATE,true);
     private final HeadphoneBandLimiter filteredXPathLowPass=new HeadphoneBandLimiter(SAMPLE_RATE,false);
+    private final HeadphoneBandLimiter filteredXObservationBand=new HeadphoneBandLimiter(SAMPLE_RATE,true);
 
     private final float[] predictorWeights=new float[PREDICTOR_TAPS];
     private final float[] referenceHistory;
@@ -85,7 +87,7 @@ public final class HeadphoneFeedforwardFxNlms {
         Arrays.fill(predictorWeights,0f);Arrays.fill(referenceHistory,0f);Arrays.fill(predictedHistory,0f);
         Arrays.fill(filteredPredictedHistory,0f);Arrays.fill(driveHistory,0f);Arrays.fill(predictorPathHistory,0f);
         predictorErrorPower=signalPower=1e-8f;confidence=confidenceSmooth=0f;runawayCounter=0;
-        seedControllerFromSecondaryPath();referenceBand.reset();outputLowPass.reset();filteredXPathLowPass.reset();
+        seedControllerFromSecondaryPath();referenceBand.reset();outputLowPass.reset();secondaryObservationBand.reset();filteredXPathLowPass.reset();filteredXObservationBand.reset();
         safetyRamp=0f;safetyHoldSamples=(int)(1.5f*SAMPLE_RATE);safetyTrips++;
         safetyStatus="Safety rollback · "+reason;
     }
@@ -118,12 +120,12 @@ public final class HeadphoneFeedforwardFxNlms {
         // Transport can rise when media volume is lowered, but is hard-limited to PCM float safety.
         float transportDrive=clamp(modelDrive*routeGainCompensation,-0.5f,0.5f);
         driveHistory[drivePos]=modelDrive;
-        float predictedCancellation=convolveSecondary(driveHistory,drivePos);
+        float predictedCancellation=secondaryObservationBand.process(convolveSecondary(driveHistory,drivePos));
         float predictedResidual=predictedFuture+predictedCancellation;
 
         float predictedThroughOutputFilter=filteredXPathLowPass.process(predictedFuture);
         predictorPathHistory[pathPos]=predictedThroughOutputFilter;
-        float xf=convolveSecondary(predictorPathHistory,pathPos);filteredPredictedHistory[filteredPos]=xf;
+        float xf=filteredXObservationBand.process(convolveSecondary(predictorPathHistory,pathPos));filteredPredictedHistory[filteredPos]=xf;
         float adaptGate=smoothstep(0.02f,0.30f,confidenceSmooth);
         if(adaptationAllowed&&adaptGate>0f&&userOutputScale>0f){
             float norm=1e-5f;for(float v:filteredPredictedHistory)norm+=v*v;

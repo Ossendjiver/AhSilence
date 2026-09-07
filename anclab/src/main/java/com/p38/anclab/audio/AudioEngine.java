@@ -136,9 +136,10 @@ public final class AudioEngine {
     /** Optional speculative vehicle broadband can be toggled live; narrowband lanes keep running. */
     public synchronized void setVehicleBroadbandEnabled(boolean enabled){
         vehicleBroadbandEnabled=enabled;
+        VehicleNarrowbandBank bank=vehicleNarrowband;if(bank!=null)bank.setBroadbandEnabled(enabled);
         if(mode!=Mode.VEHICLE||!running.get())return;
         if(!enabled){vehicleFx=null;safetyStatus="Speculative broadband OFF · telemetry narrowband lanes continue";}
-        else if(calibration!=null){vehicleFx=new FeedbackFxNlms(calibration.secondaryPath,calibration.delaySamples,128,calibration.safeOutputCeiling);configureVehicleFx(vehicleFx);safetyStatus="Speculative broadband ON · live predictable lane bands excluded";}
+        else if(calibration!=null){vehicleFx=new FeedbackFxNlms(calibration.secondaryPath,calibration.delaySamples,128,calibration.safeOutputCeiling);configureVehicleFx(vehicleFx);if(bank!=null)vehicleFx.setExcludedFrequencies(bank.frequenciesHz());safetyStatus="Speculative broadband ON · live predictable lane bands excluded";}
     }
 
     public GraphSnapshot getGraphSnapshot(){synchronized(graphLock){int n=graphCount;float[] r=new float[n],d=new float[n],c=new float[n],e=new float[n];int start=(graphWrite-n+GRAPH_POINTS)%GRAPH_POINTS;for(int i=0;i<n;i++){int p=(start+i)%GRAPH_POINTS;r[i]=graphReference[p];d[i]=graphDrive[p];c[i]=graphPredictedCancellation[p];e[i]=graphPredictedResidual[p];}return new GraphSnapshot(r,d,c,e,SAMPLE_RATE/(float)GRAPH_DECIMATION,running.get());}}
@@ -204,9 +205,9 @@ public final class AudioEngine {
                         calibration.safeOutputCeiling,antiNoisePercent/100f,
                         calibration.minimumCancellationHz,calibration.maximumCancellationHz,
                         vehicleRecipeRouteKey(),profiles.loadCancellationRecipes(profileId));
-                vehicleExcluder=new PredictableFrequencyExcluder(SAMPLE_RATE,vehicleNarrowband.frequenciesHz());
+                vehicleNarrowband.setBroadbandEnabled(broadbandEnabled);
                 lastVehicleFrequencyRevision=vehicleNarrowband.frequencyRevision();lastVehicleExcluderUpdateMs=System.currentTimeMillis();
-                if(broadbandEnabled){vehicleFx=new FeedbackFxNlms(calibration.secondaryPath,calibration.delaySamples,128,calibration.safeOutputCeiling);configureVehicleFx(vehicleFx);}else vehicleFx=null;
+                if(broadbandEnabled){vehicleFx=new FeedbackFxNlms(calibration.secondaryPath,calibration.delaySamples,128,calibration.safeOutputCeiling);configureVehicleFx(vehicleFx);vehicleFx.setExcludedFrequencies(vehicleNarrowband.frequenciesHz());}else vehicleFx=null;
             }
             expectedOutputRouteId=routed==null?0:routed.getId();routeMissingBlocks=0;initializeVolumeCompensation();
             running.set(true);if(monitorLogEnabled)monitoringLog.start();worker=new Thread(this::runLoop,"ANC-Lab-Audio");worker.setPriority(Thread.MAX_PRIORITY);worker.start();
@@ -232,7 +233,7 @@ public final class AudioEngine {
                 }else if(mode==Mode.VEHICLE){
                     float narrowModel=vehicleNarrowband==null?0f:vehicleNarrowband.process(in[i]);
                     float broadModel=0f;
-                    if(vehicleBroadbandEnabled&&vehicleFx!=null){float broadIn=vehicleExcluder==null?in[i]:vehicleExcluder.process(in[i]);vehicleFx.process(broadIn);broadModel=vehicleFx.diagnosticModelDrive();ref=vehicleFx.diagnosticReference();cancel=vehicleFx.diagnosticPredictedCancellation();residual=vehicleFx.diagnosticMeasuredResidual();}
+                    if(vehicleBroadbandEnabled&&vehicleFx!=null){vehicleFx.process(in[i]);broadModel=vehicleFx.diagnosticModelDrive();ref=vehicleFx.diagnosticReference();cancel=vehicleFx.diagnosticPredictedCancellation();residual=vehicleFx.diagnosticMeasuredResidual();}
                     else {ref=in[i];cancel=narrowModel;residual=in[i];}
                     float totalModelCeiling=calibration.safeOutputCeiling*(antiNoisePercent/100f);
                     float combinedModel=clamp(narrowModel+broadModel,-totalModelCeiling,totalModelCeiling);
@@ -257,9 +258,9 @@ public final class AudioEngine {
     }
 
     private void updateVehicleBroadbandExclusions(){
-        if(vehicleNarrowband==null||vehicleExcluder==null)return;long rev=vehicleNarrowband.frequencyRevision();long now=System.currentTimeMillis();
+        if(vehicleNarrowband==null||vehicleFx==null)return;long rev=vehicleNarrowband.frequencyRevision();long now=System.currentTimeMillis();
         if(rev==lastVehicleFrequencyRevision||now-lastVehicleExcluderUpdateMs<750)return;
-        vehicleExcluder.setFrequencies(vehicleNarrowband.frequenciesHz());lastVehicleFrequencyRevision=rev;lastVehicleExcluderUpdateMs=now;
+        vehicleFx.setExcludedFrequencies(vehicleNarrowband.frequenciesHz());lastVehicleFrequencyRevision=rev;lastVehicleExcluderUpdateMs=now;
     }
 
     private void persistVehicleRecipesIfDue(){
