@@ -8,7 +8,9 @@ import java.util.Arrays;
  * This remains deliberately experimental: unlike the coherent narrowband lanes it has no upstream
  * physical reference. The selected cabin microphone is the measured error sensor and the controller
  * reconstructs a disturbance estimate by subtracting the calibrated loudspeaker return. Predictable
- * narrow tones are removed before this class so the two controllers cannot fight each other.
+ * narrow tones are notched only after that reconstruction, so the measured microphone and modelled
+ * speaker return remain in the same 15-600 Hz observation domain before the broadband reference is
+ * formed.
  */
 public final class FeedbackFxNlms {
     public static final int CONTROLLER_TAPS=128;
@@ -27,8 +29,11 @@ public final class FeedbackFxNlms {
     private float routeGainCompensation=1f;
 
     private final HeadphoneBandLimiter errorBand=new HeadphoneBandLimiter(SAMPLE_RATE,true);
+    private final HeadphoneBandLimiter secondaryObservationBand=new HeadphoneBandLimiter(SAMPLE_RATE,true);
     private final HeadphoneBandLimiter outputLowPass=new HeadphoneBandLimiter(SAMPLE_RATE,false);
     private final HeadphoneBandLimiter filteredXPathLowPass=new HeadphoneBandLimiter(SAMPLE_RATE,false);
+    private final PredictableFrequencyExcluder predictableExcluder=
+            new PredictableFrequencyExcluder(SAMPLE_RATE,new double[0]);
     private int safetyHoldSamples=0;
     private float safetyRamp=1f;
     private int runawayCounter=0,safetyTrips=0;
@@ -52,12 +57,13 @@ public final class FeedbackFxNlms {
     /** Vehicle broadband receives at most 25% of the user-selected total ANC allowance. */
     public void setUserOutputScale(float v){userOutputScale=clamp(v,0f,1f)*BROADBAND_SHARE;}
     public void setRouteGainCompensation(float v){routeGainCompensation=clamp(v,0f,4f);}
+    public void setExcludedFrequencies(double[] frequenciesHz){predictableExcluder.setFrequencies(frequenciesHz);}
     public void notifyRouteGainChanged(){safetyHoldSamples=Math.max(safetyHoldSamples,(int)(0.35f*SAMPLE_RATE));safetyStatus="Media volume changed · vehicle broadband briefly ramped down";}
 
     public void reset(){
         Arrays.fill(w,0f);Arrays.fill(xHist,0f);Arrays.fill(xfHist,0f);Arrays.fill(yDelay,0f);Arrays.fill(refDelay,0f);
         xPos=xfPos=yPos=refPos=0;inRms=outRms=modelOutRms=0f;runawayCounter=0;ceilingOccupancy=0f;
-        errorBand.reset();outputLowPass.reset();filteredXPathLowPass.reset();
+        errorBand.reset();secondaryObservationBand.reset();outputLowPass.reset();filteredXPathLowPass.reset();predictableExcluder.reset();
         lastReference=lastPredictedCancellation=lastExpectedResidual=lastMeasuredResidual=lastControllerOutput=lastModelDrive=0f;
     }
 
@@ -75,8 +81,14 @@ public final class FeedbackFxNlms {
             inRms=0.995f*inRms+0.005f*error*error;outRms*=0.995f;modelOutRms*=0.995f;
             return 0f;
         }
-        float predictedCancellation=convolveDelayedOutput();
-        float reference=error-predictedCancellation;
+
+        // Model the loudspeaker return in the same 15-600 Hz observation path as the selected
+        // microphone. Only then reconstruct the disturbance and remove frequencies already owned
+        // by the narrowband bank. Notching measuredError before secondary-path subtraction mixes
+        // unlike signal domains and biases the feedback reference.
+        float predictedCancellation=secondaryObservationBand.process(convolveDelayedOutput());
+        float reconstructedDisturbance=error-predictedCancellation;
+        float reference=predictableExcluder.process(reconstructedDisturbance);
         xHist[xPos]=reference;
 
         if(safetyHoldSamples>0){safetyHoldSamples--;safetyRamp=Math.max(0f,safetyRamp-1f/480f);}else{safetyRamp=Math.min(1f,safetyRamp+1f/2400f);}
