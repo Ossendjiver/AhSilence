@@ -55,8 +55,8 @@ jobs:
             -alias androiddebugkey | grep -E "SHA256:|Owner:|Valid from:"
       - name: Make Gradle wrapper executable
         run: chmod +x gradlew
-      - name: Build ANC Lab debug APK
-        run: ./gradlew :anclab:clean :anclab:assembleDebug --stacktrace
+      - name: Test and build ANC Lab debug APK
+        run: ./gradlew :anclab:clean :anclab:testDebugUnitTest :anclab:assembleDebug --stacktrace
       - name: Upload ANC Lab APK
         uses: actions/upload-artifact@v4
         with:
