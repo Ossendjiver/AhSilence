@@ -4,6 +4,22 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.9-rebuild] — 2026-09-08
+
+### Changed
+- Reconsider persistent fallback candidates on later discovery scans instead of permanently losing a strong tone when all controller slots were occupied at first detection.
+- Allow up to 10 microphone-discovered narrowband fallback lanes when speculative broadband ANC is off; broadband mode retains the conservative six-lane reserve.
+- Protect active and calibrating lanes from replacement. A full bank may replace only a genuinely idle/rejected lane after its retry delay, and only for a candidate at least 6 dB stronger.
+- Require at least -62 dBFS for a fallback tone to consume a cancellation controller while preserving full 8–200 Hz monitoring and logging.
+- Keep the accepted pre-continuity tracking behaviour. The later single-scan continuity experiment is deliberately not included because the targeted replay lost most of the useful prop-shaft coverage.
+- Model vehicle broadband loudspeaker return through the same 15–600 Hz observation path as the microphone, reconstruct the disturbance first, and only then notch frequencies owned by narrowband controllers.
+- Apply the corresponding observation-path correction to predictive headphone secondary-path and filtered-X modelling.
+
+### Validation basis
+- The 20–200 second P38 targeted replay identified the dominant ~34.4 Hz prop-shaft region as a missed high-value lane under the old six-slot fallback policy.
+- The selected admission-floor candidate increased warm productive cancellation from 342.3 to 354.5 lane-seconds (+3.6%) and recovered 43.8 seconds from the previously absent prop-shaft band in the synthetic-path replay.
+- These WAV replays use a synthetic unity-gain 50 ms speaker path and validate controller behaviour only; real cabin attenuation still requires closed-loop in-car testing.
+
 ## [0.5.8.1-rebuild] — 2026-09-07
 
 ### Fixed
