@@ -10,8 +10,8 @@ android {
         applicationId = "com.p38.anclab"
         minSdk = 26
         targetSdk = 35
-        versionCode = 6
-        versionName = "0.5.1-rebuild"
+        versionCode = 7
+        versionName = "0.5.2-rebuild"
     }
 
     // Do not rely on Gradle's implicit debug-keystore lookup. CI creates/restores one
