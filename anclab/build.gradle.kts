@@ -10,13 +10,10 @@ android {
         applicationId = "com.p38.anclab"
         minSdk = 26
         targetSdk = 35
-        versionCode = 7
-        versionName = "0.5.2-rebuild"
+        versionCode = 8
+        versionName = "0.5.3-rebuild"
     }
 
-    // Do not rely on Gradle's implicit debug-keystore lookup. CI creates/restores one
-    // development key at this exact path and every ANC Lab debug APK is explicitly signed
-    // with it. This makes the installed signer stable across GitHub Actions runs.
     signingConfigs {
         create("ancLabDev") {
             storeFile = file(System.getProperty("user.home") + "/.android/debug.keystore")
@@ -38,10 +35,7 @@ android {
         }
         release {
             isMinifyEnabled = false
-            proguardFiles(
-                getDefaultProguardFile("proguard-android-optimize.txt"),
-                "proguard-rules.pro"
-            )
+            proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"),"proguard-rules.pro")
         }
     }
 }
