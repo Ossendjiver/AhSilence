@@ -102,6 +102,7 @@ public final class VehicleNarrowbandBank {
         redistributeLimits();
         frequencyRevision++;
         status=lanes.length==0?"No configured telemetry lanes · narrow-line discovery ready":"Predictable narrowband · waiting for live telemetry";
+        publishLaneRegistry();
     }
 
     private synchronized int effectiveLaneCount(){
@@ -192,8 +193,6 @@ public final class VehicleNarrowbandBank {
             if(l.controller.output().gain()>1e-5)cancelling++;
         }
 
-        // No usable physical-model lane: revert automatically to the recovered v0.5-style
-        // persistent narrow-line discovery path rather than doing nothing.
         if(available==0){
             if(!fallbackMode){fallbackMode=true;discoveryAnalysisCounter=DISCOVERY_SCAN_EVERY_ANALYSES;discoveryDetector.reset();}
             DiscoveryResult r=analyzeFallbackDiscovery(window,first,now);
@@ -212,6 +211,7 @@ public final class VehicleNarrowbandBank {
             status=String.format(Locale.US,"Predictable narrowband · %d/%d telemetry · %d cancelling · %d learning%s",
                     available,lanes.length,cancelling,learning,telem.isEmpty()?"":"\n"+telem);
         }
+        publishLaneRegistry();
     }
 
     private synchronized DiscoveryResult analyzeFallbackDiscovery(float[] window,long first,long now){
@@ -258,10 +258,6 @@ public final class VehicleNarrowbandBank {
             double gain=l.controller.output().gain();
             if(gain>1e-5)cancelling++;
 
-            // If a candidate never becomes useful and the microphone line has disappeared, free
-            // the lane. A lane already producing validated cancellation is left to AutoController's
-            // own worse-result rollback rather than being removed merely because cancellation made
-            // the residual tone quiet.
             if(gain<=1e-5&&now-l.lastStrongMs>DISCOVERY_INACTIVE_STALE_MS){
                 l.controller.stop();iterator.remove();moved=true;changed=true;
             }
@@ -281,6 +277,25 @@ public final class VehicleNarrowbandBank {
         if(!discovered.isEmpty())frequencyRevision++;
         discovered.clear();
         if(redistribute)redistributeLimits();
+        publishLaneRegistry();
+    }
+
+    private synchronized void publishLaneRegistry(){
+        List<VehicleLaneRegistry.Lane> state=new ArrayList<>();
+        for(Lane l:lanes){
+            if(!l.available)continue;
+            AutoController.Output o=l.controller.output();
+            state.add(new VehicleLaneRegistry.Lane(l.model.id(),l.label,o.frequencyHz(),o.gain(),
+                    Math.toDegrees(o.phaseRadians()),l.controller.stageName(),o.status(),
+                    l.controller.currentImprovementDb(),false));
+        }
+        for(DiscoveredLane l:discovered){
+            AutoController.Output o=l.controller.output();
+            state.add(new VehicleLaneRegistry.Lane(l.id,l.label,o.frequencyHz(),o.gain(),
+                    Math.toDegrees(o.phaseRadians()),l.controller.stageName(),o.status(),
+                    l.controller.currentImprovementDb(),true));
+        }
+        VehicleLaneRegistry.publish(state);
     }
 
     private float[] copyRing(){float[] out=new float[ringCount];int start=ringPos-ringCount;if(start<0)start+=ring.length;for(int i=0;i<ringCount;i++)out[i]=ring[(start+i)%ring.length];return out;}
