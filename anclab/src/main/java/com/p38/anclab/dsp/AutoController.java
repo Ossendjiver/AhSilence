@@ -396,17 +396,28 @@ public final class AutoController {
 
     private void updateFine(SpectrumSnapshot snapshot, long nowMs) {
         if (elapsed(nowMs) < SETTLE_MS || !targetMatches(snapshot)) return;
+        Complex measuredCommand = command;
         double residual = snapshot.targetComplex().magnitude();
         if (residual > Math.min(baselineResidual * 1.02, previousResidual * 1.25)) {
             command = previousCommand;
             residual = previousResidual;
             rejectedAdaptations++;
             if (rejectedAdaptations >= 3) {
-                command = Complex.ZERO;
-                stage = Stage.BASELINE;
+                // The secondary path usually remains valid while road/engine phase changes. Infer
+                // the new disturbance from the measured residual and current command, then safely
+                // verify a freshly calculated command at half strength before considering a new
+                // acoustic path probe.
+                baseline = snapshot.targetComplex().subtract(secondaryPath.multiply(measuredCommand));
+                baselineResidual = baseline.magnitude();
+                previousCommand = command;
+                previousResidual = residual;
+                command = baseline.negate().divide(secondaryPath)
+                        .clampMagnitude(maximumGain).multiply(0.5);
+                usingLearnedSecondaryPath = true;
+                stage = Stage.VERIFY_HALF;
                 stageStartedMs = nowMs;
                 rejectedAdaptations = 0;
-                status = label + ": acoustic path changed; recalibrating…";
+                status = label + ": disturbance changed; validating fresh phase…";
                 return;
             }
         } else {

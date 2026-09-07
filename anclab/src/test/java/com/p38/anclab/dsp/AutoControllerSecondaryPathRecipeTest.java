@@ -41,6 +41,23 @@ public class AutoControllerSecondaryPathRecipeTest {
         assertEquals("RUNNING", controller.stageName());
     }
 
+    @Test public void repeatedFineRejectionsReusePathInsteadOfRefreshingBaseline() {
+        Complex secondaryPath = Complex.polar(2.0, -0.40);
+        Complex disturbance = Complex.polar(0.04, 0.75);
+        AutoController controller = runWarmStart(secondaryPath, disturbance);
+        long now = 2_500;
+
+        for (int attempt = 0; attempt < 3; attempt++) {
+            controller.update(snapshot(Complex.polar(0.02, 1.4)), now);
+            assertEquals("VERIFY_FINE", controller.stageName());
+            now += 700;
+            controller.update(snapshot(Complex.polar(0.04, -1.0)), now);
+            now += 400;
+        }
+
+        assertEquals("VERIFY_HALF", controller.stageName());
+    }
+
     private static AutoController runWarmStart(Complex secondaryPath, Complex disturbance) {
         AutoController controller = new AutoController();
         controller.startTrackingWithSecondaryPath(0, 0.05, FREQUENCY_HZ,
