@@ -5,11 +5,10 @@ import java.util.Arrays;
 /**
  * Measured-error broadband feedback FxNLMS used by vehicle profiles.
  *
- * The selected cabin microphone is the physical error sensor. The controller reconstructs a
- * disturbance reference by subtracting the calibrated loudspeaker-to-microphone return from the
- * measured microphone signal. Predictable engine/shaft components are removed before this class
- * by PredictableFrequencyExcluder so this speculative broadband loop cannot fight the dedicated
- * narrowband lanes.
+ * This remains deliberately experimental: unlike the coherent narrowband lanes it has no upstream
+ * physical reference. The selected cabin microphone is the measured error sensor and the controller
+ * reconstructs a disturbance estimate by subtracting the calibrated loudspeaker return. Predictable
+ * narrow tones are removed before this class so the two controllers cannot fight each other.
  */
 public final class FeedbackFxNlms {
     public static final int CONTROLLER_TAPS=128;
@@ -32,6 +31,7 @@ public final class FeedbackFxNlms {
     private int safetyHoldSamples=0;
     private float safetyRamp=1f;
     private int runawayCounter=0,safetyTrips=0;
+    private float ceilingOccupancy=0f;
     private volatile String safetyStatus="";
     private float inRms=0f,outRms=0f,modelOutRms=0f;
 
@@ -53,12 +53,14 @@ public final class FeedbackFxNlms {
 
     public void reset(){
         Arrays.fill(w,0f);Arrays.fill(xHist,0f);Arrays.fill(xfHist,0f);Arrays.fill(yDelay,0f);Arrays.fill(refDelay,0f);
-        xPos=xfPos=yPos=refPos=0;inRms=outRms=modelOutRms=0f;runawayCounter=0;errorBand.reset();outputLowPass.reset();filteredXPathLowPass.reset();
+        xPos=xfPos=yPos=refPos=0;inRms=outRms=modelOutRms=0f;runawayCounter=0;ceilingOccupancy=0f;
+        errorBand.reset();outputLowPass.reset();filteredXPathLowPass.reset();
         lastReference=lastPredictedCancellation=lastExpectedResidual=lastMeasuredResidual=lastControllerOutput=lastModelDrive=0f;
     }
 
     public void emergencyMuteAndReset(String reason){
-        reset();safetyRamp=0f;safetyHoldSamples=(int)(1.5f*SAMPLE_RATE);safetyTrips++;safetyStatus="Safety rollback · "+reason;
+        int priorTrips=safetyTrips;
+        reset();safetyTrips=priorTrips+1;safetyRamp=0f;safetyHoldSamples=(int)(1.5f*SAMPLE_RATE);safetyStatus="Safety rollback · "+reason;
     }
 
     public float process(float measuredError){
@@ -89,7 +91,21 @@ public final class FeedbackFxNlms {
         boolean suspect=currentModel>0.015f&&currentModel>8f*Math.max(currentIn,0.0001f);
         boolean severe=currentModel>0.060f&&currentModel>4f*Math.max(currentIn,0.0001f);
         if((suspect||severe)&&safetyHoldSamples<=0)runawayCounter++;else runawayCounter=Math.max(0,runawayCounter-4);
-        if(runawayCounter>720){emergencyMuteAndReset("vehicle broadband feedback/runaway signature");modelDrive=transportDrive=0f;predictedCancellation=0f;}
+
+        // Field recording 2026-09-07 showed a failure that the ratio guard above could not see:
+        // the microphone was already loud, while the broadband command spent ~70% of its time at
+        // the 4% FS ceiling and reinforced a ~61.5 Hz component. Track ceiling occupancy directly.
+        float atRail=(modelCeiling>0.004f&&safetyRamp>0.95f&&Math.abs(modelDrive)>=0.90f*modelCeiling)?1f:0f;
+        ceilingOccupancy=0.9995f*ceilingOccupancy+0.0005f*atRail;
+        boolean pinned=ceilingOccupancy>0.45f&&safetyHoldSamples<=0;
+
+        if(pinned){
+            emergencyMuteAndReset("vehicle broadband remained ceiling-pinned");
+            modelDrive=transportDrive=predictedCancellation=0f;
+        }else if(runawayCounter>720){
+            emergencyMuteAndReset("vehicle broadband feedback/runaway signature");
+            modelDrive=transportDrive=predictedCancellation=0f;
+        }
 
         lastReference=reference;lastPredictedCancellation=predictedCancellation;lastExpectedResidual=reference+predictedCancellation;
         lastMeasuredResidual=error;lastControllerOutput=transportDrive;lastModelDrive=modelDrive;
@@ -101,6 +117,7 @@ public final class FeedbackFxNlms {
     public float inputRms(){return(float)Math.sqrt(Math.max(0f,inRms));}
     public float outputRms(){return(float)Math.sqrt(Math.max(0f,outRms));}
     public float modelOutputRms(){return(float)Math.sqrt(Math.max(0f,modelOutRms));}
+    public float ceilingOccupancy(){return ceilingOccupancy;}
     public int safetyTrips(){return safetyTrips;}
     public String safetyStatus(){return safetyStatus;}
     public float diagnosticReference(){return lastReference;}
