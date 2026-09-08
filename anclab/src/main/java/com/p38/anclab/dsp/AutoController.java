@@ -48,6 +48,7 @@ public final class AutoController {
     private String status = "Ready";
     private boolean fixedTarget;
     private boolean directErrorLearning;
+    private boolean blindProbesAllowed = true;
     private String label = "Dominant";
     private double currentImprovementDb = Double.NaN;
     private int rejectedAdaptations;
@@ -150,6 +151,8 @@ public final class AutoController {
     }
 
     public synchronized void setDirectErrorLearning(boolean enabled) { directErrorLearning = enabled; }
+    public synchronized void setBlindProbesAllowed(boolean allowed) { blindProbesAllowed = allowed; }
+    private boolean mustRejectInsteadOfBlindProbe() { return directErrorLearning || !blindProbesAllowed; }
 
     private long settleMs() { return directErrorLearning ? 420L : SETTLE_MS; }
     private long adaptIntervalMs() { return directErrorLearning ? 220L : ADAPT_INTERVAL_MS; }
@@ -292,7 +295,7 @@ public final class AutoController {
     }
 
     private void beginProbe(long nowMs) {
-        if (directErrorLearning) {
+        if (mustRejectInsteadOfBlindProbe()) {
             rejectActiveVerification("no trustworthy calibrated secondary path; lane quarantined");
             return;
         }
@@ -366,7 +369,7 @@ public final class AutoController {
         if (residual > baselineResidual * 1.03) {
             if (usingLearnedSecondaryPath) {
                 usingLearnedSecondaryPath = false;
-                if (directErrorLearning) {
+                if (mustRejectInsteadOfBlindProbe()) {
                     rejectActiveVerification("calibrated path increased the measured error");
                     return;
                 }
@@ -397,7 +400,7 @@ public final class AutoController {
         if (residual >= baselineResidual * requiredRatio) {
             if (usingLearnedSecondaryPath) {
                 usingLearnedSecondaryPath = false;
-                if (directErrorLearning) {
+                if (mustRejectInsteadOfBlindProbe()) {
                     rejectActiveVerification("calibrated path did not produce repeatable reduction");
                     return;
                 }

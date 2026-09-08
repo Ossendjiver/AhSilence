@@ -153,7 +153,7 @@ public final class AudioEngine {
     @SuppressLint("MissingPermission")
     public CalibrationResult calibrateHeadphones(){return calibrateRoute(ProfileStore.PROFILE_HEADPHONES);}
 
-    /** Measure selected output -> selected microphone path for Headphones, P38 or E46. */
+    /** Measure selected output -> selected microphone path for Headphones, Room, P38 or E46. */
     @SuppressLint("MissingPermission")
     public CalibrationResult calibrateRoute(String profileId){
         if(context.checkSelfPermission(Manifest.permission.RECORD_AUDIO)!=PackageManager.PERMISSION_GRANTED)return new CalibrationResult(false,null,"Microphone permission is required");
@@ -220,7 +220,7 @@ public final class AudioEngine {
                         room?Math.max(ROOM_MIN_CANCELLATION_HZ,calibration.minimumCancellationHz):calibration.minimumCancellationHz,
                         calibration.maximumCancellationHz,
                         vehicleRecipeRouteKey(),profiles.loadCancellationRecipes(profileId),room,
-                        room?calibration.secondaryPath:null,room?calibration.delaySamples:0,calibration.sampleRateHz);
+                        calibration.secondaryPath,calibration.delaySamples,calibration.sampleRateHz);
                 vehicleNarrowband.setBroadbandEnabled(broadbandEnabled);
                 lastVehicleFrequencyRevision=vehicleNarrowband.frequencyRevision();lastVehicleExcluderUpdateMs=System.currentTimeMillis();
                 if(broadbandEnabled){vehicleFx=new FeedbackFxNlms(calibration.secondaryPath,calibration.delaySamples,128,calibration.safeOutputCeiling);configureVehicleFx(vehicleFx);vehicleFx.setExcludedFrequencies(vehicleNarrowband.frequenciesHz());}else vehicleFx=null;
@@ -295,7 +295,8 @@ public final class AudioEngine {
     private String vehicleRecipeRouteKey(){
         long revision=calibration==null?0L:calibration.utcMs;
         String key=activeProfile+"|in="+inputDeviceId+"|out="+outputDeviceId+"|cal="+revision;
-        return ProfileStore.PROFILE_ROOM.equals(activeProfile)?key+"|roomPath=cal-v1":key;
+        // v2 invalidates recipes learned by the older blind-probe path in P38/E46 as well as Room.
+        return key+"|narrowPath=cal-v2";
     }
 
     private void checkSafetyTrips(int trips,String status){if(trips<=observedSafetyTrips)return;observedSafetyTrips=trips;safetyStatus=status;lastError=status;long now=System.currentTimeMillis();if(now-safetyWindowStartMs>15000){safetyWindowStartMs=now;safetyTripsInWindow=0;}safetyTripsInWindow++;if(safetyTripsInWindow>=3){lastError="ANC safety stop · repeated feedback/runaway detected";safetyStatus=lastError;running.set(false);}}

@@ -10,8 +10,8 @@ android {
         applicationId = "com.p38.anclab"
         minSdk = 26
         targetSdk = 35
-        versionCode = 24
-        versionName = "0.6.6-room-dominant-tracking-dev"
+        versionCode = 25
+        versionName = "0.6.7-shared-calibrated-safety-dev"
     }
 
     signingConfigs {
@@ -41,6 +41,6 @@ android {
 }
 
 dependencies {
-    // Room ANC v0.6.6 prioritises dominant modes, tolerates Room-frequency wander, and refreshes the calibrated path while tracking.
+    // ANC v0.6.7 shares calibrated-path, no-blind-probe fallback safety across Room, P38 and E46 while retaining telemetry-specific vehicle tracking.
     testImplementation("junit:junit:4.13.2")
 }
