@@ -29,18 +29,18 @@ public class RoomDirectErrorAdaptationTest {
 
         Complex fullResidual = disturbance.add(secondaryPath.multiply(controller.output().coefficient()));
         controller.update(snapshot(fullResidual), 1_260);
-        assertEquals("RUNNING", controller.stageName());
+        assertEquals("AUDIT_OFF", controller.stageName());
     }
 
-    @Test public void directErrorModeBeginsFineAdaptationAfter220Ms() {
+    @Test public void directErrorModeBeginsFineAdaptationAfter220MsFollowingAudit() {
         Complex secondaryPath = Complex.polar(2.0, -0.35);
         Complex disturbance = Complex.polar(0.04, 0.70);
         AutoController controller = runDirectWarmStart(secondaryPath, disturbance);
         Complex changedResidual = Complex.polar(0.02, 1.05);
 
-        controller.update(snapshot(changedResidual), 1_479);
+        controller.update(snapshot(changedResidual), 2_319);
         assertEquals("RUNNING", controller.stageName());
-        controller.update(snapshot(changedResidual), 1_480);
+        controller.update(snapshot(changedResidual), 2_320);
         assertEquals("VERIFY_FINE", controller.stageName());
     }
 
@@ -51,7 +51,13 @@ public class RoomDirectErrorAdaptationTest {
                 "room tone", false, secondaryPath);
         controller.update(snapshot(disturbance), 420);
         controller.update(snapshot(disturbance.add(secondaryPath.multiply(controller.output().coefficient()))), 840);
-        controller.update(snapshot(disturbance.add(secondaryPath.multiply(controller.output().coefficient()))), 1_260);
+        Complex controlledResidual = disturbance.add(secondaryPath.multiply(controller.output().coefficient()));
+        controller.update(snapshot(controlledResidual), 1_260);
+        assertEquals("AUDIT_OFF", controller.stageName());
+        controller.update(snapshot(disturbance), 1_680);
+        assertEquals("AUDIT_ON", controller.stageName());
+        controlledResidual = disturbance.add(secondaryPath.multiply(controller.output().coefficient()));
+        controller.update(snapshot(controlledResidual), 2_100);
         assertEquals("RUNNING", controller.stageName());
         return controller;
     }
