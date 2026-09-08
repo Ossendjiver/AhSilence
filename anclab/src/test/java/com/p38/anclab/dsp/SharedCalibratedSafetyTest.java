@@ -34,15 +34,14 @@ public class SharedCalibratedSafetyTest {
         c.setBlindProbesAllowed(false);
         c.startTrackingWithSecondaryPath(1000,0.02,68.0,"E46 telemetry",true,new Complex(1.0,0.0));
         c.update(snapshot(1.0),1800);
-        c.update(snapshot(1.20),2600);
         assertEquals("REFINE_POSITIVE",c.stageName());
         assertTrue(c.output().gain()<=0.0015+1e-12);
         // If the tiny symmetric measurement cannot resolve a local transfer, fail closed.  This
         // verifies that vehicle mode does not fall back to the former large blind reprobe.
-        c.update(snapshot(1.0),3400);
+        c.update(snapshot(1.0),2600);
         assertEquals("REFINE_NEGATIVE",c.stageName());
         assertTrue(c.output().gain()<=0.0015+1e-12);
-        c.update(snapshot(1.0),4200);
+        c.update(snapshot(1.0),3400);
         assertEquals("IDLE",c.stageName());
         assertTrue(c.activeVerificationFailed());
         assertEquals(0.0,c.output().gain(),1e-12);

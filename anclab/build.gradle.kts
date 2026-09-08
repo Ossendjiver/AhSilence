@@ -10,8 +10,8 @@ android {
         applicationId = "com.p38.anclab"
         minSdk = 26
         targetSdk = 35
-        versionCode = 27
-        versionName = "0.6.9-visible-coexistent-discovery-dev"
+        versionCode = 28
+        versionName = "0.6.10-clean-tone-control-dev"
     }
 
     signingConfigs {
@@ -41,6 +41,6 @@ android {
 }
 
 dependencies {
-    // ANC v0.6.9 separates persistent-frequency observation from controller admission and allows safe discovery to coexist with telemetry.
+    // ANC v0.6.10 uses clean non-overlapping complex measurements and mandatory tiny local path identification before any calibrated narrowband drive.
     testImplementation("junit:junit:4.13.2")
 }

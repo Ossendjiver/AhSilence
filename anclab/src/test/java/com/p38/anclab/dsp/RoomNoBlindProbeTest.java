@@ -25,16 +25,15 @@ public class RoomNoBlindProbeTest {
         c.setDirectErrorLearning(true);
         c.setBlindProbesAllowed(false);
         c.startTrackingWithSecondaryPath(1000,0.02,50.0,"Room",false,new Complex(1.0,0.0));
-        c.update(snapshot(1.0),1500);
-        c.update(snapshot(1.20),2000);
+        c.update(snapshot(1.0),1900);
         assertEquals("REFINE_POSITIVE",c.stageName());
         assertTrue(c.output().gain()<=0.0015+1e-12);
         // No measurable +/- acoustic response: refinement must stop rather than escalating to
-        // the old blind secondary-path probe.
-        c.update(snapshot(1.0),2500);
+        // a calculated cancellation command or the old blind secondary-path probe.
+        c.update(snapshot(1.0),2800);
         assertEquals("REFINE_NEGATIVE",c.stageName());
         assertTrue(c.output().gain()<=0.0015+1e-12);
-        c.update(snapshot(1.0),3000);
+        c.update(snapshot(1.0),3700);
         assertEquals("IDLE",c.stageName());
         assertTrue(c.activeVerificationFailed());
         assertEquals(0.0,c.output().gain(),1e-12);

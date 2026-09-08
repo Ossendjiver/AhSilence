@@ -38,6 +38,12 @@ public final class AutoController {
     private static final double CALIBRATED_REFINE_MAX_LANE_FRACTION = 0.12;
     private static final double CALIBRATED_REFINE_MIN_DELTA_RATIO = 0.025;
     private static final double CALIBRATED_REFINE_MAX_PATH_RATIO = 32.0;
+    // Room oscillator coefficients are smoothed with a 180 ms time constant.  Wait long enough
+    // that the entire 300 ms control phasor is effectively under the current command.
+    private static final long DIRECT_ERROR_SETTLE_MS = 850L;
+    private static final double INITIAL_VERIFICATION_SCALE = 0.25;
+    private static final double INITIAL_VERIFICATION_MAX_GAIN = 0.0040;
+    private static final double INITIAL_VERIFICATION_MIN_REDUCTION_DB = 0.30;
 
     private Stage stage = Stage.IDLE;
     private long stageStartedMs;
@@ -175,8 +181,15 @@ public final class AutoController {
     public synchronized void setBlindProbesAllowed(boolean allowed) { blindProbesAllowed = allowed; }
     private boolean mustRejectInsteadOfBlindProbe() { return directErrorLearning || !blindProbesAllowed; }
 
-    private long settleMs() { return directErrorLearning ? 420L : SETTLE_MS; }
+    private long settleMs() { return directErrorLearning ? DIRECT_ERROR_SETTLE_MS : SETTLE_MS; }
     private long adaptIntervalMs() { return directErrorLearning ? 220L : ADAPT_INTERVAL_MS; }
+
+    private Complex initialVerificationCommand() {
+        if (secondaryPath.magnitude() < 1.0e-9) return Complex.ZERO;
+        Complex optimum = baseline.negate().divide(secondaryPath).clampMagnitude(maximumGain);
+        double cap = Math.min(maximumGain, INITIAL_VERIFICATION_MAX_GAIN);
+        return optimum.multiply(INITIAL_VERIFICATION_SCALE).clampMagnitude(cap);
+    }
 
     public synchronized void setMaximumGain(double maximumGain) {
         this.maximumGain = clamp(maximumGain, 0.0001, 0.15);
@@ -312,11 +325,19 @@ public final class AutoController {
             usingLearnedSecondaryPath = true;
             previousCommand = Complex.ZERO;
             previousResidual = baselineResidual;
-            command = baseline.negate().divide(secondaryPath)
-                    .clampMagnitude(maximumGain).multiply(0.5);
+            // A short route-calibration FIR can have the wrong low-frequency phase.  For any
+            // calibrated/no-blind-probe lane, never use that seed for a large first command.
+            // Instead identify the local complex path with the bounded symmetric micro-pulse first.
+            if (mustRejectInsteadOfBlindProbe() && calibrationPath.magnitude() >= 1.0e-5) {
+                command = Complex.ZERO;
+                if (beginCalibratedRefinement(nowMs, "measuring local narrowband path before cancellation")) return;
+                rejectActiveVerification("could not start local calibrated-path measurement");
+                return;
+            }
+            command = initialVerificationCommand();
             stage = Stage.VERIFY_HALF;
             stageStartedMs = nowMs;
-            status = label + ": validating learned path at half strength…";
+            status = label + ": validating learned path at bounded initial strength…";
             return;
         }
         if (recipeCommand.magnitude() > 0) {
@@ -416,12 +437,25 @@ public final class AutoController {
             reject("trial became louder");
             return;
         }
+        if (mustRejectInsteadOfBlindProbe()) {
+            double requiredInitialRatio = Math.pow(10.0, -INITIAL_VERIFICATION_MIN_REDUCTION_DB / 20.0);
+            if (residual >= baselineResidual * requiredInitialRatio) {
+                if (usingLearnedSecondaryPath) {
+                    usingLearnedSecondaryPath = false;
+                    if (beginCalibratedRefinement(nowMs, "bounded initial trial lacked measurable benefit")) return;
+                    rejectActiveVerification("locally measured path did not reduce the tone at bounded initial strength");
+                    return;
+                }
+                reject("bounded initial trial did not reduce the tone");
+                return;
+            }
+        }
         previousCommand = command;
         previousResidual = residual;
         command = baseline.negate().divide(secondaryPath).clampMagnitude(maximumGain);
         stage = Stage.VERIFY_FULL;
         stageStartedMs = nowMs;
-        status = label + ": testing calculated level…";
+        status = label + ": bounded trial reduced the tone; testing calculated level…";
     }
 
     private void updateFull(SpectrumSnapshot snapshot, long nowMs) {
@@ -525,11 +559,11 @@ public final class AutoController {
         runtimeRefinedSecondaryPath = true;
         previousCommand = Complex.ZERO;
         previousResidual = baselineResidual;
-        command = baseline.negate().divide(secondaryPath).clampMagnitude(maximumGain).multiply(0.5);
+        command = initialVerificationCommand();
         usingLearnedSecondaryPath = true;
         stage = Stage.VERIFY_HALF;
         stageStartedMs = nowMs;
-        status = String.format(Locale.US, "%s: local path refined (%.1f× calibration); verifying half strength…",
+        status = String.format(Locale.US, "%s: local path refined (%.1f× calibration); verifying bounded initial strength…",
                 label, pathRatio);
     }
 
