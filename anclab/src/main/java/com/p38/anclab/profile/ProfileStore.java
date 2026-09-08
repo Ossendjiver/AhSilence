@@ -16,6 +16,7 @@ public final class ProfileStore {
     public static final String PROFILE_E46 = "e46";
     public static final String PROFILE_HEADPHONES = "headphones";
     public static final String PROFILE_ROOM = "room";
+    public static final String[] PROFILE_IDS = new String[]{PROFILE_P38, PROFILE_E46, PROFILE_ROOM, PROFILE_HEADPHONES};
     private static final String TAG = "ProfileStore";
     private static final String P38_BASE_TUNE_REVISION="2026-09-07-eastern-freeway-v2";
     private final AncStorage storage;
@@ -135,6 +136,19 @@ public final class ProfileStore {
         List<MechanicalFrequency> models=loadMechanicalFrequencies(profileId);double[] tmp=new double[models.size()];int n=0;
         for(MechanicalFrequency m:models){if(!m.enabled())continue;double f=m.frequencyHz();if(Double.isFinite(f)&&f>=15&&f<=600)tmp[n++]=f;}return Arrays.copyOf(tmp,n);
     }
+
+    public String loadProfileName(String profileId) {
+        String p=normalizeProfile(profileId);
+        try {JSONObject o=new JSONObject(storage.readText("profiles/"+p+"/profile.json"));String name=o.optString("name",defaultProfileName(p)).trim();return name.isEmpty()?defaultProfileName(p):name;}
+        catch(Exception e){return defaultProfileName(p);}
+    }
+    public boolean saveProfileName(String profileId,String requestedName) {
+        if(!storage.isConnected())return false;String p=normalizeProfile(profileId);String name=requestedName==null?"":requestedName.trim().replaceAll("\s+"," ");
+        if(name.isEmpty())name=defaultProfileName(p);if(name.length()>40)name=name.substring(0,40).trim();String path="profiles/"+p+"/profile.json";JSONObject o;
+        try{o=new JSONObject(storage.readText(path));}catch(Exception e){o=PROFILE_P38.equals(p)?defaultP38():PROFILE_E46.equals(p)?defaultE46():PROFILE_ROOM.equals(p)?defaultRoom():defaultHeadphones();}
+        try{o.put("id",p);o.put("name",name);}catch(Exception ignored){}return storage.writeJson(path,o.toString());
+    }
+    public static String defaultProfileName(String p){if(PROFILE_P38.equals(p))return "P38 car";if(PROFILE_E46.equals(p))return "E46 car";if(PROFILE_ROOM.equals(p))return "Room";return "Headphones";}
 
     public void saveCurrentProfile(String id) {JSONObject o=new JSONObject();try { o.put("profile",normalizeProfile(id)); } catch (Exception ignored) { }storage.writeJson("profiles/current_profile.json",o.toString());}
     public String loadCurrentProfile() {try {String s=storage.readText("profiles/current_profile.json");if(s==null)return PROFILE_HEADPHONES;return normalizeProfile(new JSONObject(s).optString("profile",PROFILE_HEADPHONES));} catch (Exception e) { return PROFILE_HEADPHONES; }}

@@ -11,7 +11,7 @@ public final class AutoController {
     private enum Stage {
         IDLE, LISTENING, BASELINE, VERIFY_RECIPE, PROBE_POSITIVE, PROBE_NEGATIVE,
         VERIFY_HALF, VERIFY_FULL, RUNNING, VERIFY_FINE, SEEK_FIRST, SEEK_SECOND,
-        SEEK_RETURN, FOLLOW_VERIFY
+        SEEK_RETURN, FOLLOW_VERIFY, AUDIT_OFF, AUDIT_ON
     }
 
     private static final long LISTEN_MS = 1500;
@@ -21,6 +21,9 @@ public final class AutoController {
     private static final double FOLLOW_DEADBAND_HZ = 0.04;
     private static final double CALIBRATION_RETUNE_HYSTERESIS_HZ = 0.55;
     private static final double RUNNING_VERIFY_HYSTERESIS_HZ = 0.20;
+    private static final double ROOM_MIN_VERIFIED_REDUCTION_DB = 1.0;
+    private static final long ROOM_AUDIT_BASE_INTERVAL_MS = 4500L;
+    private static final long ROOM_AUDIT_SPREAD_MS = 2200L;
 
     private Stage stage = Stage.IDLE;
     private long stageStartedMs;
@@ -48,6 +51,11 @@ public final class AutoController {
     private double seekDirection;
     private double seekBestFrequency;
     private double seekBestResidual;
+    private Complex auditCommand = Complex.ZERO;
+    private Complex auditOffResidual = Complex.ZERO;
+    private long lastAuditCompletedMs;
+    private boolean activeVerificationPassed;
+    private boolean activeVerificationFailed;
 
     public synchronized void start(long nowMs, double maximumGain) {
         configure(nowMs, maximumGain, 34.5, false, "Dominant");
@@ -115,6 +123,11 @@ public final class AutoController {
         baselineResidual = Double.POSITIVE_INFINITY;
         currentImprovementDb = Double.NaN;
         rejectedAdaptations = 0;
+        auditCommand = Complex.ZERO;
+        auditOffResidual = Complex.ZERO;
+        lastAuditCompletedMs = nowMs;
+        activeVerificationPassed = false;
+        activeVerificationFailed = false;
     }
 
     public synchronized void stop() {
@@ -201,6 +214,8 @@ public final class AutoController {
             case SEEK_SECOND -> updateSeekSecond(snapshot, nowMs);
             case SEEK_RETURN -> updateSeekReturn(snapshot, nowMs);
             case FOLLOW_VERIFY -> updateFollow(snapshot, nowMs);
+            case AUDIT_OFF -> updateAuditOff(snapshot, nowMs);
+            case AUDIT_ON -> updateAuditOn(snapshot, nowMs);
         }
         return output();
     }
@@ -340,7 +355,9 @@ public final class AutoController {
             command = previousCommand;
             residual = previousResidual;
         }
-        if (residual >= baselineResidual * 0.99) {
+        double requiredRatio = directErrorLearning
+                ? Math.pow(10.0, -ROOM_MIN_VERIFIED_REDUCTION_DB / 20.0) : 0.99;
+        if (residual >= baselineResidual * requiredRatio) {
             if (usingLearnedSecondaryPath) {
                 usingLearnedSecondaryPath = false;
                 command = Complex.ZERO;
@@ -353,12 +370,21 @@ public final class AutoController {
         usingLearnedSecondaryPath = false;
         previousResidual = residual;
         previousCommand = command;
+        if (directErrorLearning) {
+            beginRoomAudit(nowMs, "certifying cancellation against a muted baseline…");
+            return;
+        }
         stage = Stage.RUNNING;
         stageStartedMs = nowMs;
         status = improvementStatus(residual);
     }
 
     private void updateRunning(SpectrumSnapshot snapshot, long nowMs) {
+        if (directErrorLearning && activeVerificationPassed
+                && nowMs - lastAuditCompletedMs >= roomAuditIntervalMs()) {
+            beginRoomAudit(nowMs, "re-checking ANC on versus muted…");
+            return;
+        }
         if (!fixedTarget && elapsed(nowMs) >= settleMs()) {
             double drift = snapshot.peakFrequencyHz() - frequencyHz;
             if (Math.abs(drift) >= 0.06 && Math.abs(drift) <= 0.60) {
@@ -475,6 +501,69 @@ public final class AutoController {
         status = String.format(Locale.US, "%s: tracking %.2f Hz", label, frequencyHz);
     }
 
+    private void beginRoomAudit(long nowMs, String message) {
+        auditCommand = command;
+        command = Complex.ZERO;
+        auditOffResidual = Complex.ZERO;
+        stage = Stage.AUDIT_OFF;
+        stageStartedMs = nowMs;
+        status = label + ": " + message;
+    }
+
+    private void updateAuditOff(SpectrumSnapshot snapshot, long nowMs) {
+        command = Complex.ZERO;
+        if (elapsed(nowMs) < settleMs() || !targetMatches(snapshot)) return;
+        auditOffResidual = snapshot.targetComplex();
+        baseline = auditOffResidual;
+        baselineResidual = auditOffResidual.magnitude();
+        if (!Double.isFinite(baselineResidual) || baselineResidual < 1.0e-7
+                || auditCommand.magnitude() < 1.0e-7) {
+            rejectActiveVerification("muted baseline was not measurable");
+            return;
+        }
+        command = auditCommand.clampMagnitude(maximumGain);
+        stage = Stage.AUDIT_ON;
+        stageStartedMs = nowMs;
+        status = label + ": restoring ANC for measured A/B verification…";
+    }
+
+    private void updateAuditOn(SpectrumSnapshot snapshot, long nowMs) {
+        if (elapsed(nowMs) < settleMs() || !targetMatches(snapshot)) return;
+        double onResidual = snapshot.targetComplex().magnitude();
+        double improvement = 20.0 * Math.log10(Math.max(baselineResidual, 1.0e-9)
+                / Math.max(onResidual, 1.0e-9));
+        if (!Double.isFinite(improvement) || improvement < ROOM_MIN_VERIFIED_REDUCTION_DB) {
+            rejectActiveVerification(String.format(Locale.US,
+                    "muted A/B check found only %.1f dB reduction", improvement));
+            return;
+        }
+        activeVerificationPassed = true;
+        activeVerificationFailed = false;
+        previousCommand = command;
+        previousResidual = onResidual;
+        currentImprovementDb = improvement;
+        lastAuditCompletedMs = nowMs;
+        stage = Stage.RUNNING;
+        stageStartedMs = nowMs;
+        status = String.format(Locale.US,
+                "%s %.2f Hz · %.1f dB verified on/off reduction", label, frequencyHz, improvement);
+    }
+
+    private void rejectActiveVerification(String reason) {
+        command = Complex.ZERO;
+        auditCommand = Complex.ZERO;
+        activeVerificationPassed = false;
+        activeVerificationFailed = true;
+        currentImprovementDb = Double.NaN;
+        stage = Stage.IDLE;
+        status = label + ": " + reason + "; muted and quarantined";
+    }
+
+    private long roomAuditIntervalMs() {
+        long spread = Math.floorMod(Math.round(frequencyHz * 37.0), ROOM_AUDIT_SPREAD_MS);
+        return ROOM_AUDIT_BASE_INTERVAL_MS + spread;
+    }
+
     private void reject(String reason) {
         command = Complex.ZERO;
         currentImprovementDb = Double.NaN;
@@ -490,6 +579,8 @@ public final class AutoController {
     public synchronized double currentImprovementDb() { return currentImprovementDb; }
     public synchronized Complex secondaryPathEstimate() { return secondaryPath; }
     public synchronized boolean hasUsableSecondaryPathEstimate() { return secondaryPath.magnitude() >= 1.0e-5; }
+    public synchronized boolean hasPassedActiveVerification() { return activeVerificationPassed; }
+    public synchronized boolean activeVerificationFailed() { return activeVerificationFailed; }
     private boolean targetMatches(SpectrumSnapshot snapshot) { return Math.abs(snapshot.targetFrequencyHz() - frequencyHz) < 0.035; }
     private long elapsed(long nowMs) { return nowMs - stageStartedMs; }
 

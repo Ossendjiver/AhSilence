@@ -54,6 +54,7 @@ public final class VehicleNarrowbandBank {
     private static final long RECIPE_SAVE_INTERVAL_MS=30000;
     private static final int DIRECT_FEEDBACK_RECIPE_SUCCESS_UPDATES=4;
     private static final long DIRECT_FEEDBACK_RECIPE_SAVE_INTERVAL_MS=8000;
+    private static final long DIRECT_FEEDBACK_AUDIT_RETRY_MS=60000;
 
     private final ButterworthLowPass analysisLowPass=new ButterworthLowPass(SAMPLE_RATE,210.0);
     private final DcBlocker analysisDc=new DcBlocker(Math.exp(-2.0*Math.PI*3.0/SAMPLE_RATE));
@@ -368,7 +369,10 @@ public final class VehicleNarrowbandBank {
             }
 
             double gain=0.0;
-            if(l.cancellable){
+            if(l.auditRejected&&now-l.auditRejectedMs>=DIRECT_FEEDBACK_AUDIT_RETRY_MS){
+                l.controller.stop();iterator.remove();moved=true;changed=true;continue;
+            }
+            if(l.cancellable&&!l.auditRejected){
                 if("IDLE".equals(l.controller.stageName())){
                     if(l.idleSinceMs==0)l.idleSinceMs=now;
                     if(FrequencyLanePolicy.controllerRetryDue(l.controller.stageName(),l.idleSinceMs,now))
@@ -377,7 +381,12 @@ public final class VehicleNarrowbandBank {
                 double controlled=l.controller.output().frequencyHz();
                 SpectrumSnapshot exact=SpectrumAnalyzer.analyze(window,first,ANALYSIS_RATE,
                         Math.max(8.0,controlled-0.15),Math.min(200.0,controlled+0.15),controlled,l.referenceEpoch,l.referencePhase);
-                l.controller.update(exact,now);gain=l.controller.output().gain();maybeCaptureRecipe(l,now);
+                l.controller.update(exact,now);
+                if(l.controller.activeVerificationFailed()){
+                    l.auditRejected=true;l.auditRejectedMs=now;l.successUpdates=0;gain=0.0;
+                }else{
+                    gain=l.controller.output().gain();maybeCaptureRecipe(l,now);
+                }
             }
             if(gain>1e-5)cancelling++;
 
@@ -401,7 +410,7 @@ public final class VehicleNarrowbandBank {
     /** Monitor-only discoveries stay visible but do not consume cancellation-controller capacity. */
     private int discoveredControllerSlotCount(){
         int count=0;
-        for(DiscoveredLane lane:discovered)if(lane.cancellable)count++;
+        for(DiscoveredLane lane:discovered)if(lane.cancellable&&!lane.auditRejected)count++;
         return count;
     }
 
@@ -466,6 +475,7 @@ public final class VehicleNarrowbandBank {
     }
 
     private void maybeCaptureRecipe(Lane lane,long now){
+        if(directFeedbackLearning&&!lane.controller.hasPassedActiveVerification()){lane.successUpdates=0;return;}
         if(!successful(lane.controller)){lane.successUpdates=0;return;}
         if(++lane.successUpdates<recipeSuccessUpdates()||now-lane.lastRecipeMs<recipeSaveIntervalMs())return;
         double source=telemetry==null?Double.NaN:telemetry.sourceValue(lane.model);
@@ -474,6 +484,7 @@ public final class VehicleNarrowbandBank {
     }
 
     private void maybeCaptureRecipe(DiscoveredLane lane,long now){
+        if(directFeedbackLearning&&!lane.controller.hasPassedActiveVerification()){lane.successUpdates=0;return;}
         if(!successful(lane.controller)){lane.successUpdates=0;return;}
         if(++lane.successUpdates<recipeSuccessUpdates()||now-lane.lastRecipeMs<recipeSaveIntervalMs())return;
         captureRecipe("discovered",MechanicalFrequency.SourceType.FIXED,lane.anchorFrequencyHz,
@@ -487,7 +498,7 @@ public final class VehicleNarrowbandBank {
     private void captureRecipe(String modelId,MechanicalFrequency.SourceType sourceType,double source,
                                AutoController controller,double frequency){
         Complex path=controller.secondaryPathEstimate();double improvement=controller.currentImprovementDb();
-        double minimumImprovement=directFeedbackLearning?0.35:1.0;
+        double minimumImprovement=1.0;
         if(path.magnitude()<1.0e-5||!Double.isFinite(improvement)||improvement<minimumImprovement)return;
         double sourceBin=VehicleCancellationRecipe.quantizeSource(sourceType,source,frequency);
         VehicleCancellationRecipe observation=new VehicleCancellationRecipe(routeKey,modelId,sourceType,
@@ -530,7 +541,7 @@ public final class VehicleNarrowbandBank {
             AutoController.Output o=l.controller.output();
             state.add(new VehicleLaneRegistry.Lane(l.id,l.label,o.frequencyHz(),o.gain(),
                     Math.toDegrees(o.phaseRadians()),l.controller.stageName(),o.status(),
-                    l.controller.currentImprovementDb(),true,!l.cancellable));
+                    l.controller.currentImprovementDb(),true,!l.cancellable||l.auditRejected));
         }
         VehicleLaneRegistry.publish(state);
     }
@@ -542,7 +553,7 @@ public final class VehicleNarrowbandBank {
         Lane(MechanicalFrequency model,double f){this.model=model;label=model.name();currentFrequencyHz=f;oscillator.frequencyHz=f;oscillator.targetFrequencyHz=f;}
     }
     private static final class DiscoveredLane {
-        final String id,label;final double anchorFrequencyHz;final AutoController controller=new AutoController();final AdaptiveFrequencyTracker tracker=new AdaptiveFrequencyTracker();final Oscillator oscillator=new Oscillator();long referenceEpoch;double referencePhase;double currentFrequencyHz,lastPeakDbFs=-120.0;long lastStrongMs,lastRecipeMs,idleSinceMs;boolean cancellable;int successUpdates;
+        final String id,label;final double anchorFrequencyHz;final AutoController controller=new AutoController();final AdaptiveFrequencyTracker tracker=new AdaptiveFrequencyTracker();final Oscillator oscillator=new Oscillator();long referenceEpoch;double referencePhase;double currentFrequencyHz,lastPeakDbFs=-120.0;long lastStrongMs,lastRecipeMs,idleSinceMs,auditRejectedMs;boolean cancellable,auditRejected;int successUpdates;
         DiscoveredLane(String id,double f,long now){this.id=id;label=String.format(Locale.US,"Auto %.1f Hz",f);anchorFrequencyHz=f;currentFrequencyHz=f;lastStrongMs=now;oscillator.frequencyHz=f;oscillator.targetFrequencyHz=f;tracker.setBounds(Math.max(8.0,f-DISCOVERY_TRACK_HALF_WIDTH_HZ),Math.min(200.0,f+DISCOVERY_TRACK_HALF_WIDTH_HZ));}
     }
     private record DiscoveryResult(boolean moved,int cancelling) { }
