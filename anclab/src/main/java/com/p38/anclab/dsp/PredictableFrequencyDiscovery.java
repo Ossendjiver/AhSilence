@@ -24,7 +24,7 @@ public final class PredictableFrequencyDiscovery {
 
     public PredictableFrequencyDiscovery(double minHz,double maxHz){this.minHz=minHz;this.maxHz=maxHz;}
 
-    /** Hot-loop form: detector age is derived from the audio sample clock, not a wall-clock syscall. */
+    /** Hot-loop form: detector age is derived from the audio sample clock. */
     public void observe(float sample){
         inputSamplesSeen++;
         if(++decimator<DECIMATION)return;decimator=0;
@@ -32,6 +32,9 @@ public final class PredictableFrequencyDiscovery {
         if(++sinceUpdate<UPDATE_SAMPLES||count<ring.length)return;sinceUpdate=0;
         update(Math.round(inputSamplesSeen*1000.0/INPUT_RATE));
     }
+
+    /** Compatibility overload; the external wall-clock value is intentionally ignored. */
+    public void observe(float sample,long ignoredNowMs){observe(sample);}
 
     /** Deterministic test/replay hook. */
     void observeAt(float sample,long nowMs){
