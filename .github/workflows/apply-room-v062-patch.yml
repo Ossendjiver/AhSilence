@@ -26,8 +26,7 @@ jobs:
                   anclab/src/main/java/com/p38/anclab/audio/AudioEngine.java \
                   anclab/src/main/java/com/p38/anclab/MainActivity.java \
                   anclab/src/main/java/com/p38/anclab/AncMediaService.java \
-                  anclab/build.gradle.kts \
-                  .github/workflows/build-anclab.yml
+                  anclab/build.gradle.kts
           git diff --cached --check
           git commit -m 'Add direct-feedback Room ANC profile'
           git push origin HEAD:feature/room-anc-v062
