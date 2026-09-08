@@ -3,23 +3,29 @@ package com.p38.anclab.dsp;
 import java.util.Locale;
 
 /**
- * Deliberately simple fixed-tone acceptance harness for 120 Hz ANC.
+ * Calibration-independent fixed-tone ANC acceptance harness.
  *
- * This controller does not use route calibration, vehicle telemetry, recipes or a secondary-path
- * model.  Every candidate is measured physically at the microphone, and output returns to zero
- * between candidates.  It first searches phase, then gain, then locally refines phase.  A selected
- * solution is only held when an ANC-on measurement beats the immediately preceding muted baseline.
- * Periodic muted A/B audits re-lock the command to the external tone and prevent persistent
- * reinforcement.
+ * The requested test frequency is deliberately held EXACTLY.  v0.6.11 tried to infer a tiny
+ * frequency correction from successive muted microphone phases; real recordings showed that the
+ * baseline was still contaminated by the preceding acoustic command and the correction could walk
+ * a nominal 120 Hz output to ~120.08 Hz or further.  That makes a good cancellation phase drift
+ * away again.  This lab therefore treats the selected bench tone as authoritative and searches
+ * only phase and gain.
+ *
+ * Every candidate is physically measured at the error microphone.  Output is muted and allowed to
+ * settle before every fresh baseline, then phase is swept, gain is swept, and the winning phase is
+ * locally refined.  A solution is held only after a muted-vs-on physical A/B measurement confirms
+ * a real reduction.  Periodic audits are intentionally much less frequent than v0.6.11 so a good
+ * solution can remain stationary long enough to prove that it truly holds.
  */
 public final class FixedToneCancellationLab {
-    public static final double TARGET_HZ = 120.0;
+    public static final double[] TEST_FREQUENCIES_HZ = {45.0,65.0,90.0,120.0,160.0,250.0,500.0};
     private static final double TWO_PI = Math.PI * 2.0;
     private static final int SAMPLE_RATE = 48000;
-    private static final int MEASURE_SAMPLES = 16800; // 350 ms = 42 cycles at 120 Hz
-    private static final int SETTLE_SAMPLES = 7200;   // 150 ms
-    private static final int HOLD_SAMPLES = 120000;   // 2.5 s between physical A/B audits
-    private static final double MIN_TONE_AMPLITUDE = 0.00015;
+    private static final int MUTE_SETTLE_SAMPLES = 14400; // 300 ms, prevents prior command ring-down contaminating baseline
+    private static final int DRIVE_SETTLE_SAMPLES = 9600; // 200 ms before measuring a driven candidate
+    private static final int HOLD_SAMPLES = 384000;       // 8 s of uninterrupted verified cancellation
+    private static final double MIN_TONE_AMPLITUDE = 0.00012;
     private static final double MAX_DIGITAL_GAIN = 0.020;
     private static final double MIN_HOLD_IMPROVEMENT_DB = 0.50;
     private static final double RESTART_WORSE_DB = -0.50;
@@ -29,20 +35,19 @@ public final class FixedToneCancellationLab {
             Math.toRadians(-20),Math.toRadians(-10),0.0,Math.toRadians(10),Math.toRadians(20)};
     static { for(int i=0;i<PHASE_OFFSETS.length;i++)PHASE_OFFSETS[i]=TWO_PI*i/PHASE_OFFSETS.length; }
 
-    private enum Stage { BASELINE, PHASE_SETTLE, PHASE_MEASURE, GAIN_SETTLE, GAIN_MEASURE,
-        REFINE_SETTLE, REFINE_MEASURE, AUDIT_SETTLE, AUDIT_MEASURE, HOLD }
+    private enum Stage { BASELINE_SETTLE, BASELINE_MEASURE, PHASE_SETTLE, PHASE_MEASURE,
+        GAIN_SETTLE, GAIN_MEASURE, REFINE_SETTLE, REFINE_MEASURE,
+        AUDIT_SETTLE, AUDIT_MEASURE, HOLD }
     private enum Next { PHASE, GAIN, REFINE, AUDIT }
 
-    private Stage stage=Stage.BASELINE;
+    private final double targetHz;
+    private final int measureSamples;
+    private Stage stage=Stage.BASELINE_SETTLE;
     private Next next=Next.PHASE;
-    private long sampleIndex=0;
     private int stageSamples=0;
     private double referencePhase=0.0;
-    private double trackedHz=TARGET_HZ;
     private double measureRe=0.0,measureIm=0.0;
-    private double baselineAmp=Double.NaN,baselinePhaseNow=0.0;
-    private double previousBaselinePhase=Double.NaN,previousBaselineCenter=Double.NaN;
-    private double lastFrequencyErrorHz=0.0;
+    private double baselineAmp=Double.NaN,baselinePhase=0.0;
     private int phaseIndex=0,phasePass=0,gainIndex=0,refineIndex=0;
     private double probeGain=0.0030;
     private double candidateGain=0.0,candidateOffset=0.0,commandPhase=0.0;
@@ -50,7 +55,17 @@ public final class FixedToneCancellationLab {
     private volatile double bestImprovementDb=Double.NEGATIVE_INFINITY;
     private volatile double lastMeasuredImprovementDb=Double.NaN;
     private volatile float userScale=0.50f;
-    private volatile String status="120 Hz lab · measuring muted baseline";
+    private volatile String status;
+
+    public FixedToneCancellationLab(){this(120.0);}
+    public FixedToneCancellationLab(double targetHz){
+        if(!Double.isFinite(targetHz)||targetHz<20.0||targetHz>1000.0)throw new IllegalArgumentException("Unsupported fixed-tone frequency");
+        this.targetHz=targetHz;
+        // At least ~24 cycles for low-frequency phase accuracy, never shorter than 350 ms.
+        double seconds=Math.max(0.350,24.0/targetHz);
+        this.measureSamples=(int)Math.round(SAMPLE_RATE*seconds);
+        status=label()+" · muted settle before baseline";
+    }
 
     public void setUserOutputScale(float scale){
         userScale=Math.max(0f,Math.min(1f,scale));
@@ -58,7 +73,9 @@ public final class FixedToneCancellationLab {
     }
     public String status(){return status;}
     public double bestImprovementDb(){return bestImprovementDb;}
-    public double trackedFrequencyHz(){return trackedHz;}
+    public double targetFrequencyHz(){return targetHz;}
+    /** Kept for diagnostics/API compatibility: the lab no longer adapts frequency. */
+    public double trackedFrequencyHz(){return targetHz;}
     public double currentGain(){return isDrivenStage()?candidateGain:0.0;}
 
     public float process(float microphone){
@@ -67,14 +84,14 @@ public final class FixedToneCancellationLab {
         float output=0f;
         if(isDrivenStage())output=(float)(candidateGain*Math.cos(referencePhase+commandPhase));
 
-        stageSamples++; sampleIndex++;
-        referencePhase+=TWO_PI*trackedHz/SAMPLE_RATE;
+        stageSamples++;
+        referencePhase+=TWO_PI*targetHz/SAMPLE_RATE;
         if(referencePhase>=TWO_PI)referencePhase-=TWO_PI;
         advanceIfDue();
         return output;
     }
 
-    private boolean isMeasureStage(){return stage==Stage.BASELINE||stage==Stage.PHASE_MEASURE
+    private boolean isMeasureStage(){return stage==Stage.BASELINE_MEASURE||stage==Stage.PHASE_MEASURE
             ||stage==Stage.GAIN_MEASURE||stage==Stage.REFINE_MEASURE||stage==Stage.AUDIT_MEASURE;}
     private boolean isDrivenStage(){return stage==Stage.PHASE_SETTLE||stage==Stage.PHASE_MEASURE
             ||stage==Stage.GAIN_SETTLE||stage==Stage.GAIN_MEASURE||stage==Stage.REFINE_SETTLE
@@ -82,10 +99,16 @@ public final class FixedToneCancellationLab {
             ||stage==Stage.HOLD;}
 
     private void advanceIfDue(){
-        int due=isMeasureStage()?MEASURE_SAMPLES:(stage==Stage.HOLD?HOLD_SAMPLES:SETTLE_SAMPLES);
+        int due=switch(stage){
+            case BASELINE_SETTLE -> MUTE_SETTLE_SAMPLES;
+            case BASELINE_MEASURE,PHASE_MEASURE,GAIN_MEASURE,REFINE_MEASURE,AUDIT_MEASURE -> measureSamples;
+            case HOLD -> HOLD_SAMPLES;
+            default -> DRIVE_SETTLE_SAMPLES;
+        };
         if(stageSamples<due)return;
         switch(stage){
-            case BASELINE -> finishBaseline();
+            case BASELINE_SETTLE -> beginMeasure(Stage.BASELINE_MEASURE);
+            case BASELINE_MEASURE -> finishBaseline();
             case PHASE_SETTLE -> beginMeasure(Stage.PHASE_MEASURE);
             case PHASE_MEASURE -> finishPhaseCandidate();
             case GAIN_SETTLE -> beginMeasure(Stage.GAIN_MEASURE);
@@ -94,64 +117,52 @@ public final class FixedToneCancellationLab {
             case REFINE_MEASURE -> finishRefineCandidate();
             case AUDIT_SETTLE -> beginMeasure(Stage.AUDIT_MEASURE);
             case AUDIT_MEASURE -> finishAudit();
-            case HOLD -> { next=Next.AUDIT; beginBaseline("periodic muted A/B audit"); }
+            case HOLD -> { next=Next.AUDIT; beginBaseline("periodic physical A/B audit"); }
         }
     }
 
     private void finishBaseline(){
         ComplexResult m=finishMeasurement();
         baselineAmp=m.amplitude;
-        double centre=sampleIndex-MEASURE_SAMPLES*0.5;
-        if(Double.isFinite(previousBaselinePhase)&&Double.isFinite(previousBaselineCenter)){
-            double dt=(centre-previousBaselineCenter)/SAMPLE_RATE;
-            if(dt>0.05){
-                double delta=wrap(m.phase-previousBaselinePhase);
-                double err=delta/(TWO_PI*dt);
-                err=clamp(err,-0.30,0.30);
-                lastFrequencyErrorHz=err;
-                trackedHz=clamp(trackedHz+0.70*err,119.50,120.50);
-            }
-        }
-        previousBaselinePhase=m.phase;previousBaselineCenter=centre;
-        baselinePhaseNow=wrap(m.phase+TWO_PI*lastFrequencyErrorHz*(MEASURE_SAMPLES*0.5/SAMPLE_RATE));
+        baselinePhase=m.phase;
         if(!(baselineAmp>=MIN_TONE_AMPLITUDE)){
-            status=String.format(Locale.US,"120 Hz lab · waiting for clear tone · %.5f amplitude",baselineAmp);
-            next=Next.PHASE;stage=Stage.BASELINE;stageSamples=0;resetMeasurement();return;
+            status=String.format(Locale.US,"%s · waiting for clear tone · %.5f amplitude",label(),baselineAmp);
+            next=Next.PHASE;stage=Stage.BASELINE_SETTLE;stageSamples=0;resetMeasurement();return;
         }
         startNextCandidate();
     }
 
     private void startNextCandidate(){
         double max=maxGain();
-        if(max<1.0e-5){status="120 Hz lab · anti-noise limit is 0%";beginBaseline("muted");return;}
+        if(max<1.0e-5){status=label()+" · anti-noise limit is 0%";beginBaseline("muted");return;}
         switch(next){
             case PHASE -> {
                 candidateGain=Math.min(probeGain,max);
                 candidateOffset=PHASE_OFFSETS[phaseIndex];
-                commandPhase=wrap(baselinePhaseNow+candidateOffset);
+                commandPhase=wrap(baselinePhase+candidateOffset);
                 beginSettle(Stage.PHASE_SETTLE,String.format(Locale.US,
-                        "120 Hz lab · phase sweep %d/%d · probe %.4f",phaseIndex+1,PHASE_OFFSETS.length,candidateGain));
+                        "%s · phase sweep %d/%d · probe %.4f",label(),phaseIndex+1,PHASE_OFFSETS.length,candidateGain));
             }
             case GAIN -> {
                 candidateGain=gainForIndex(gainIndex,max);
                 candidateOffset=bestOffset;
-                commandPhase=wrap(baselinePhaseNow+candidateOffset);
+                commandPhase=wrap(baselinePhase+candidateOffset);
                 beginSettle(Stage.GAIN_SETTLE,String.format(Locale.US,
-                        "120 Hz lab · gain sweep · %.4f · best %.2f dB",candidateGain,bestImprovementDb));
+                        "%s · gain sweep · %.4f · best %.2f dB",label(),candidateGain,bestImprovementDb));
             }
             case REFINE -> {
                 candidateGain=Math.min(bestGain,max);
                 candidateOffset=wrap(bestOffset+REFINE_OFFSETS[refineIndex]);
-                commandPhase=wrap(baselinePhaseNow+candidateOffset);
+                commandPhase=wrap(baselinePhase+candidateOffset);
                 beginSettle(Stage.REFINE_SETTLE,String.format(Locale.US,
-                        "120 Hz lab · local phase refine %d/%d",refineIndex+1,REFINE_OFFSETS.length));
+                        "%s · local phase refine %d/%d",label(),refineIndex+1,REFINE_OFFSETS.length));
             }
             case AUDIT -> {
                 candidateGain=Math.min(bestGain,max);
                 candidateOffset=bestOffset;
-                commandPhase=wrap(baselinePhaseNow+candidateOffset);
+                commandPhase=wrap(baselinePhase+candidateOffset);
                 beginSettle(Stage.AUDIT_SETTLE,String.format(Locale.US,
-                        "120 Hz lab · A/B verifying best · gain %.4f · phase %+,.1f°",candidateGain,Math.toDegrees(bestOffset)));
+                        "%s · A/B verifying best · gain %.4f · phase %+.1f°",label(),candidateGain,Math.toDegrees(bestOffset)));
             }
         }
     }
@@ -180,7 +191,7 @@ public final class FixedToneCancellationLab {
     private void finishRefineCandidate(){
         double improvement=improvementDb(finishMeasurement().amplitude);considerBest(improvement,candidateGain,candidateOffset);
         lastMeasuredImprovementDb=improvement;refineIndex++;
-        if(refineIndex>=REFINE_OFFSETS.length){next=Next.AUDIT;}
+        if(refineIndex>=REFINE_OFFSETS.length)next=Next.AUDIT;
         beginBaseline(String.format(Locale.US,"refine result %.2f dB",improvement));
     }
 
@@ -190,11 +201,9 @@ public final class FixedToneCancellationLab {
             if(improvement>bestImprovementDb)bestImprovementDb=improvement;
             stage=Stage.HOLD;stageSamples=0;
             status=String.format(Locale.US,
-                    "120 Hz lab · HOLDING VERIFIED cancellation · %.2f dB reduction · %.3f Hz · gain %.4f · phase %+,.1f°",
-                    improvement,trackedHz,candidateGain,Math.toDegrees(bestOffset));
-        }else{
-            restartSearch(String.format(Locale.US,"A/B benefit %.2f dB; searching again",improvement));
-        }
+                    "%s · HOLDING VERIFIED cancellation · %.2f dB reduction · exact %.1f Hz · gain %.4f · phase %+.1f°",
+                    label(),improvement,targetHz,candidateGain,Math.toDegrees(bestOffset));
+        }else restartSearch(String.format(Locale.US,"A/B benefit %.2f dB; searching again",improvement));
     }
 
     private void considerBest(double improvement,double gain,double offset){
@@ -208,23 +217,23 @@ public final class FixedToneCancellationLab {
     }
 
     private void restartSearch(String why){
-        stage=Stage.BASELINE;next=Next.PHASE;stageSamples=0;phaseIndex=0;phasePass=0;gainIndex=0;refineIndex=0;
+        stage=Stage.BASELINE_SETTLE;next=Next.PHASE;stageSamples=0;phaseIndex=0;phasePass=0;gainIndex=0;refineIndex=0;
         probeGain=Math.min(0.0030,maxGain());candidateGain=0;candidateOffset=0;commandPhase=0;
         bestGain=0;bestOffset=0;bestImprovementDb=Double.NEGATIVE_INFINITY;lastMeasuredImprovementDb=Double.NaN;
-        resetMeasurement();status="120 Hz lab · "+why+" · measuring muted baseline";
+        resetMeasurement();status=label()+" · "+why+" · muted settle before baseline";
     }
-    private void beginBaseline(String reason){stage=Stage.BASELINE;stageSamples=0;candidateGain=0;resetMeasurement();status="120 Hz lab · muted baseline · "+reason;}
+    private void beginBaseline(String reason){stage=Stage.BASELINE_SETTLE;stageSamples=0;candidateGain=0;resetMeasurement();status=label()+" · muted settle · "+reason;}
     private void beginSettle(Stage s,String text){stage=s;stageSamples=0;resetMeasurement();status=text;}
     private void beginMeasure(Stage s){stage=s;stageSamples=0;resetMeasurement();}
     private void resetMeasurement(){measureRe=measureIm=0.0;}
     private ComplexResult finishMeasurement(){
-        double re=2.0*measureRe/MEASURE_SAMPLES,im=2.0*measureIm/MEASURE_SAMPLES;resetMeasurement();
+        double re=2.0*measureRe/measureSamples,im=2.0*measureIm/measureSamples;resetMeasurement();
         return new ComplexResult(Math.hypot(re,im),Math.atan2(im,re));
     }
     private double maxGain(){return MAX_DIGITAL_GAIN*Math.max(0.0,Math.min(1.0,userScale));}
     private int gainCount(double max){int n=0;double last=-1;for(double g:GAIN_LEVELS){double x=Math.min(g,max);if(x>1e-6&&Math.abs(x-last)>1e-7){n++;last=x;}if(g>=max)break;}return Math.max(1,n);}
     private double gainForIndex(int index,double max){int n=0;double last=-1;for(double g:GAIN_LEVELS){double x=Math.min(g,max);if(x>1e-6&&Math.abs(x-last)>1e-7){if(n==index)return x;n++;last=x;}if(g>=max)break;}return max;}
+    private String label(){return String.format(Locale.US,"%.0f Hz lab",targetHz);}
     private static double wrap(double x){while(x>Math.PI)x-=TWO_PI;while(x<=-Math.PI)x+=TWO_PI;return x;}
-    private static double clamp(double v,double lo,double hi){return Math.max(lo,Math.min(hi,v));}
     private record ComplexResult(double amplitude,double phase){}
 }
