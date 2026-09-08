@@ -1,9 +1,9 @@
-name: Apply Room ANC v0.6.4 smooth verification patch
+name: Apply Room ANC v0.6.5 calibrated-path patch
 on:
   push:
     branches: [ feature/room-anc-v062 ]
     paths:
-      - 'tools/apply_room_v064_smooth_verification.py'
+      - 'tools/apply_room_v065_calibrated_path.py'
       - '.github/workflows/apply-room-v062-patch.yml'
 permissions:
   contents: write
@@ -15,13 +15,13 @@ jobs:
         with:
           ref: feature/room-anc-v062
           fetch-depth: 0
-      - name: Apply Room smooth verification and lane stability patch
-        run: python3 tools/apply_room_v064_smooth_verification.py
-      - name: Commit Room v0.6.4 update
+      - name: Apply Room calibrated-path and quiet-discovery patch
+        run: python3 tools/apply_room_v065_calibrated_path.py
+      - name: Commit Room v0.6.5 update
         run: |
           git config user.name 'Ossendjiver'
           git config user.email '39517879+Ossendjiver@users.noreply.github.com'
           git add anclab
           git diff --cached --check
-          git commit -m 'Smooth Room ANC verification and lane ownership'
+          git commit -m 'Use calibrated Room secondary path and quiet discovery'
           git push origin HEAD:feature/room-anc-v062
