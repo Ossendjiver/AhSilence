@@ -15,6 +15,7 @@ public final class ProfileStore {
     public static final String PROFILE_P38 = "p38";
     public static final String PROFILE_E46 = "e46";
     public static final String PROFILE_HEADPHONES = "headphones";
+    public static final String PROFILE_ROOM = "room";
     private static final String TAG = "ProfileStore";
     private static final String P38_BASE_TUNE_REVISION="2026-09-07-eastern-freeway-v2";
     private final AncStorage storage;
@@ -27,6 +28,7 @@ public final class ProfileStore {
         if (!storage.exists("profiles/p38/profile.json")) storage.writeJson("profiles/p38/profile.json", defaultP38().toString());
         if (!storage.exists("profiles/e46/profile.json")) storage.writeJson("profiles/e46/profile.json", defaultE46().toString());
         if (!storage.exists("profiles/headphones/profile.json")) storage.writeJson("profiles/headphones/profile.json", defaultHeadphones().toString());
+        if (!storage.exists("profiles/room/profile.json")) storage.writeJson("profiles/room/profile.json", defaultRoom().toString());
         if (!storage.exists("profiles/mechanical_frequencies.json")) storage.writeJson("profiles/mechanical_frequencies.json", defaultP38Mechanical().toString());
         if (!storage.exists("profiles/latency_profiles.jsonl")) storage.writeText("profiles/latency_profiles.jsonl", "");
         if (!storage.exists("recipes/cancellation_recipes.jsonl")) storage.writeText("recipes/cancellation_recipes.jsonl", "");
@@ -37,16 +39,16 @@ public final class ProfileStore {
         if (!storage.exists("profiles/e46/mechanical_frequencies.json")) storage.writeJson("profiles/e46/mechanical_frequencies.json", new JSONArray().toString());
         if (!storage.exists("profiles/e46/mechanical_learning.json")) storage.writeJson("profiles/e46/mechanical_learning.json", emptyLearning(PROFILE_E46).toString());
         if (!storage.exists("profiles/headphones/test_frequencies.json")) storage.writeJson("profiles/headphones/test_frequencies.json", defaultHeadphoneFrequencies().toString());
-        for (String p : new String[]{PROFILE_P38, PROFILE_E46, PROFILE_HEADPHONES}) {
+        for (String p : new String[]{PROFILE_P38, PROFILE_E46, PROFILE_HEADPHONES, PROFILE_ROOM}) {
             if (!storage.exists("profiles/"+p+"/latency_profiles.jsonl")) storage.writeText("profiles/"+p+"/latency_profiles.jsonl", "");
             if (!storage.exists("recipes/"+p+".jsonl")) storage.writeText("recipes/"+p+".jsonl", "");
             if (!storage.exists("profiles/"+p+"/runtime_settings.json")) {
                 JSONObject o=new JSONObject();
-                try { o.put("antiNoisePercent", 50);o.put("speculativeBroadband", false); } catch (Exception ignored) { }
+                try { o.put("antiNoisePercent", 50);o.put("speculativeBroadband", PROFILE_ROOM.equals(p)); } catch (Exception ignored) { }
                 storage.writeJson("profiles/"+p+"/runtime_settings.json",o.toString());
             }
         }
-        AppLog.i(TAG, "P38, E46 and Headphones profile folders ready in " + AncStorage.DISPLAY_PATH);
+        AppLog.i(TAG, "P38, E46, Headphones and Room profile folders ready in " + AncStorage.DISPLAY_PATH);
     }
 
     public HeadphoneCalibration loadRouteCalibration(String profileId) {
@@ -114,7 +116,7 @@ public final class ProfileStore {
 
     /** Parsed mechanical models used by live GPS/OBD prediction and acoustic learning. */
     public List<MechanicalFrequency> loadMechanicalFrequencies(String profileId){
-        String p=normalizeProfile(profileId);List<MechanicalFrequency> result=new ArrayList<>();if(PROFILE_HEADPHONES.equals(p))return result;
+        String p=normalizeProfile(profileId);List<MechanicalFrequency> result=new ArrayList<>();if(PROFILE_HEADPHONES.equals(p)||PROFILE_ROOM.equals(p))return result;
         try{
             JSONArray a=new JSONArray(storage.readText("profiles/"+p+"/mechanical_frequencies.json"));
             for(int i=0;i<a.length();i++){
@@ -136,10 +138,12 @@ public final class ProfileStore {
 
     public void saveCurrentProfile(String id) {JSONObject o=new JSONObject();try { o.put("profile",normalizeProfile(id)); } catch (Exception ignored) { }storage.writeJson("profiles/current_profile.json",o.toString());}
     public String loadCurrentProfile() {try {String s=storage.readText("profiles/current_profile.json");if(s==null)return PROFILE_HEADPHONES;return normalizeProfile(new JSONObject(s).optString("profile",PROFILE_HEADPHONES));} catch (Exception e) { return PROFILE_HEADPHONES; }}
-    private String normalizeProfile(String id) {if (PROFILE_P38.equalsIgnoreCase(id)) return PROFILE_P38;if (PROFILE_E46.equalsIgnoreCase(id)) return PROFILE_E46;return PROFILE_HEADPHONES;}
+    private String normalizeProfile(String id) {if (PROFILE_P38.equalsIgnoreCase(id)) return PROFILE_P38;if (PROFILE_E46.equalsIgnoreCase(id)) return PROFILE_E46;if (PROFILE_ROOM.equalsIgnoreCase(id)) return PROFILE_ROOM;return PROFILE_HEADPHONES;}
 
     private JSONObject defaultP38() {JSONObject o=new JSONObject();try {o.put("id",PROFILE_P38);o.put("name","P38 car");o.put("description","P38 vehicle ANC with live speed/RPM mechanical-order learning");o.put("algorithm","telemetry-tracked multi-lane narrowband + optional measured-error broadband-feedback-fxnlms");o.put("monitorLogEnabled",true);o.put("mechanicalFrequenciesFile","mechanical_frequencies.json");o.put("mechanicalLearningFile","mechanical_learning.json");o.put("baseTuneRevision",P38_BASE_TUNE_REVISION);o.put("recipeFile","../../recipes/p38.jsonl");o.put("latencyHistoryFile","latency_profiles.jsonl");o.put("speculativeBroadbandDefault",false);o.put("broadbandExcludesPredictableLanes",true);} catch (Exception ignored) { }return o;}
     private JSONObject defaultE46() {JSONObject o=new JSONObject();try {o.put("id",PROFILE_E46);o.put("name","E46 car");o.put("description","Independent vehicle profile; mechanical-frequency list starts empty and learns after models are added");o.put("algorithm","telemetry-tracked multi-lane narrowband + optional measured-error broadband-feedback-fxnlms");o.put("monitorLogEnabled",true);o.put("mechanicalFrequenciesFile","mechanical_frequencies.json");o.put("mechanicalLearningFile","mechanical_learning.json");o.put("recipeFile","../../recipes/e46.jsonl");o.put("latencyHistoryFile","latency_profiles.jsonl");o.put("speculativeBroadbandDefault",false);o.put("broadbandExcludesPredictableLanes",true);} catch (Exception ignored) { }return o;}
+    private JSONObject defaultRoom() {JSONObject o=new JSONObject();try {o.put("id",PROFILE_ROOM);o.put("name","Room");o.put("description","Stationary room ANC using the selected microphone as the directly observed error sensor");o.put("algorithm","persistent narrowband discovery + measured-error feedback-fxnlms");o.put("monitorLogEnabled",true);o.put("directErrorMicrophone",true);o.put("recipeFile","../../recipes/room.jsonl");o.put("latencyHistoryFile","latency_profiles.jsonl");o.put("speculativeBroadbandDefault",true);o.put("broadbandExcludesPredictableLanes",true);o.put("notes","The room microphone hears the acoustic result of ANC, so successful measured speaker-to-mic path corrections are learned and fed into the persistent recipe book more aggressively than vehicle mode.");} catch (Exception ignored) { }return o;}
+
     private JSONObject defaultHeadphones() {JSONObject o=new JSONObject();try {o.put("id",PROFILE_HEADPHONES);o.put("name","Headphones");o.put("bench",true);o.put("algorithm","predictive-feedforward-fxnlms");o.put("predictorTaps",128);o.put("controllerTaps",128);o.put("secondaryPathTaps",128);o.put("predictionHorizonFromCalibration",true);o.put("usesMeasuredBulkDelay",true);o.put("referenceMicrophone","external-phone-mic");o.put("inEarErrorMicrophone",false);o.put("calibrationFile","calibration.json");o.put("testFrequenciesHz",new JSONArray(Arrays.asList(20,30,40,50,63,80,100,125,160,200)));o.put("notes","Predictive 15-600 Hz feed-forward FxNLMS. Phone mic is reference-only during normal IEM use; route calibration stores bulk delay, FIR and media-volume reference.");} catch (Exception ignored) { }return o;}
 
     private JSONArray defaultHeadphoneFrequencies() {JSONArray a=new JSONArray(); int[] hz={20,30,40,50,63,80,100,125,160,200};for(int f:hz)addFixed(a,"headphone-"+f,"Bench "+f+" Hz",f); return a;}

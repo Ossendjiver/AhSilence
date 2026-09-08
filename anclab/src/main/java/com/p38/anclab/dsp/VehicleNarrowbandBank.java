@@ -52,6 +52,8 @@ public final class VehicleNarrowbandBank {
     private static final long DISCOVERY_INACTIVE_STALE_MS=8000;
     private static final int RECIPE_SUCCESS_UPDATES=12;
     private static final long RECIPE_SAVE_INTERVAL_MS=30000;
+    private static final int DIRECT_FEEDBACK_RECIPE_SUCCESS_UPDATES=4;
+    private static final long DIRECT_FEEDBACK_RECIPE_SAVE_INTERVAL_MS=8000;
 
     private final ButterworthLowPass analysisLowPass=new ButterworthLowPass(SAMPLE_RATE,210.0);
     private final DcBlocker analysisDc=new DcBlocker(Math.exp(-2.0*Math.PI*3.0/SAMPLE_RATE));
@@ -64,6 +66,7 @@ public final class VehicleNarrowbandBank {
     private final String routeKey;
     private final double cancellationMinimumHz;
     private final double cancellationMaximumHz;
+    private final boolean directFeedbackLearning;
 
     private int ringPos=0,ringCount=0,decimator=0,sinceAnalysis=0,discoveryAnalysisCounter=0;
     private long totalAnalysisSamples=0;
@@ -80,14 +83,22 @@ public final class VehicleNarrowbandBank {
                                  float safeOutputCeiling,float userScale){
         this(models,telemetry,safeOutputCeiling,userScale,
                 FrequencyLanePolicy.DEFAULT_CANCELLATION_MINIMUM_HZ,
-                FrequencyLanePolicy.MONITOR_MAXIMUM_HZ,"",List.of());
+                FrequencyLanePolicy.MONITOR_MAXIMUM_HZ,"",List.of(),false);
     }
 
     public VehicleNarrowbandBank(List<MechanicalFrequency> models,VehicleTelemetryRuntime telemetry,
                                  float safeOutputCeiling,float userScale,
                                  double cancellationMinimumHz,double cancellationMaximumHz,
                                  String routeKey,List<VehicleCancellationRecipe> recipes){
+        this(models,telemetry,safeOutputCeiling,userScale,cancellationMinimumHz,cancellationMaximumHz,routeKey,recipes,false);
+    }
+
+    public VehicleNarrowbandBank(List<MechanicalFrequency> models,VehicleTelemetryRuntime telemetry,
+                                 float safeOutputCeiling,float userScale,
+                                 double cancellationMinimumHz,double cancellationMaximumHz,
+                                 String routeKey,List<VehicleCancellationRecipe> recipes,boolean directFeedbackLearning){
         this.telemetry=telemetry;
+        this.directFeedbackLearning=directFeedbackLearning;
         totalCeiling=clamp(Math.abs(safeOutputCeiling),0.005f,0.15f);
         this.userScale=clamp(userScale,0f,1f);
         this.cancellationMinimumHz=Math.max(FrequencyLanePolicy.MONITOR_MINIMUM_HZ,
@@ -288,8 +299,9 @@ public final class VehicleNarrowbandBank {
         if(moved)frequencyRevision++;
         String telem=telemetry==null?"":telemetry.status();
         if(controllable==0){
-            status=String.format(Locale.US,"No cancellable GPS/OBD lane · auto-discovering stable 8–200 Hz lines · %d found · %d cancelling · %d monitor-only%s",
-                    discovered.size(),cancelling,monitorOnly,telem.isEmpty()?"":"\n"+telem);
+            status=directFeedbackLearning
+                    ?String.format(Locale.US,"Room direct feedback · auto-discovering stable 8–200 Hz lines · %d found · %d cancelling · recipes update after %d successful observations",discovered.size(),cancelling,recipeSuccessUpdates())
+                    :String.format(Locale.US,"No cancellable GPS/OBD lane · auto-discovering stable 8–200 Hz lines · %d found · %d cancelling · %d monitor-only%s",discovered.size(),cancelling,monitorOnly,telem.isEmpty()?"":"\n"+telem);
         }else{
             status=String.format(Locale.US,"Predictable narrowband · %d/%d telemetry · %d controllable · %d cancelling · %d monitor-only · %d learning%s",
                     available,lanes.length,controllable,cancelling,monitorOnly,learning,telem.isEmpty()?"":"\n"+telem);
@@ -453,7 +465,7 @@ public final class VehicleNarrowbandBank {
 
     private void maybeCaptureRecipe(Lane lane,long now){
         if(!successful(lane.controller)){lane.successUpdates=0;return;}
-        if(++lane.successUpdates<RECIPE_SUCCESS_UPDATES||now-lane.lastRecipeMs<RECIPE_SAVE_INTERVAL_MS)return;
+        if(++lane.successUpdates<recipeSuccessUpdates()||now-lane.lastRecipeMs<recipeSaveIntervalMs())return;
         double source=telemetry==null?Double.NaN:telemetry.sourceValue(lane.model);
         captureRecipe(lane.model.id(),lane.model.detectedNumberType(),source,lane.controller,lane.currentFrequencyHz);
         lane.successUpdates=0;lane.lastRecipeMs=now;
@@ -461,16 +473,20 @@ public final class VehicleNarrowbandBank {
 
     private void maybeCaptureRecipe(DiscoveredLane lane,long now){
         if(!successful(lane.controller)){lane.successUpdates=0;return;}
-        if(++lane.successUpdates<RECIPE_SUCCESS_UPDATES||now-lane.lastRecipeMs<RECIPE_SAVE_INTERVAL_MS)return;
+        if(++lane.successUpdates<recipeSuccessUpdates()||now-lane.lastRecipeMs<recipeSaveIntervalMs())return;
         captureRecipe("discovered",MechanicalFrequency.SourceType.FIXED,lane.anchorFrequencyHz,
                 lane.controller,lane.currentFrequencyHz);
         lane.successUpdates=0;lane.lastRecipeMs=now;
     }
 
+    private int recipeSuccessUpdates(){return directFeedbackLearning?DIRECT_FEEDBACK_RECIPE_SUCCESS_UPDATES:RECIPE_SUCCESS_UPDATES;}
+    private long recipeSaveIntervalMs(){return directFeedbackLearning?DIRECT_FEEDBACK_RECIPE_SAVE_INTERVAL_MS:RECIPE_SAVE_INTERVAL_MS;}
+
     private void captureRecipe(String modelId,MechanicalFrequency.SourceType sourceType,double source,
                                AutoController controller,double frequency){
         Complex path=controller.secondaryPathEstimate();double improvement=controller.currentImprovementDb();
-        if(path.magnitude()<1.0e-5||!Double.isFinite(improvement)||improvement<1.0)return;
+        double minimumImprovement=directFeedbackLearning?0.35:1.0;
+        if(path.magnitude()<1.0e-5||!Double.isFinite(improvement)||improvement<minimumImprovement)return;
         double sourceBin=VehicleCancellationRecipe.quantizeSource(sourceType,source,frequency);
         VehicleCancellationRecipe observation=new VehicleCancellationRecipe(routeKey,modelId,sourceType,
                 sourceBin,frequency,path.re(),path.im(),improvement,1,System.currentTimeMillis());
