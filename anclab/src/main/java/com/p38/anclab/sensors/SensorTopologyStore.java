@@ -11,6 +11,7 @@ import java.util.List;
 
 /** Persists profile-specific sensor topology without making sensors mandatory for legacy ANC. */
 public final class SensorTopologyStore {
+    public static final String RP2040_CLOCK_DOMAIN="rp2040-main";
     private final AncStorage storage;
     public SensorTopologyStore(AncStorage storage){this.storage=storage;}
 
@@ -29,25 +30,35 @@ public final class SensorTopologyStore {
     public boolean save(String profileId,List<AncSensorDefinition> sensors){
         if(!storage.isConnected())return false;String p=normalize(profileId);JSONArray a=new JSONArray();
         for(AncSensorDefinition s:sensors)if(s!=null)a.put(s.toJson());
-        JSONObject root=new JSONObject();try{root.put("format","anc-lab-sensor-topology-v1");root.put("profile",p);root.put("stereoReady",true);root.put("sensors",a);}catch(Exception ignored){}
+        JSONObject root=new JSONObject();try{root.put("format","anc-lab-sensor-topology-v2");root.put("profile",p);root.put("inputClockDomain",RP2040_CLOCK_DOMAIN);root.put("sensorPrimaryCapable",true);root.put("sensors",a);}catch(Exception ignored){}
         return storage.writeJson("profiles/"+p+"/sensors.json",root.toString());
     }
 
+    /**
+     * Current P38 hardware plan:
+     * - two ADXL345s on one RP2040-controlled SPI bus (separate chip selects),
+     * - four TLV320ADC5140 microphone channels over TDM,
+     * - all six input sources timestamped by the RP2040 sample clock,
+     * - stereo cancellation leaves Android through a separately calibrated output route.
+     */
     public List<AncSensorDefinition> defaults(){
         List<AncSensorDefinition> s=new ArrayList<>();
-        s.add(sensor("accel-tunnel-left","Transmission tunnel accelerometer L",AncSensorDefinition.Type.ADXL345,AncSensorDefinition.Side.LEFT,"Transmission tunnel · left side","i2c/bridge",800));
-        s.add(sensor("accel-tunnel-right","Transmission tunnel accelerometer R",AncSensorDefinition.Type.ADXL345,AncSensorDefinition.Side.RIGHT,"Transmission tunnel · right side","i2c/bridge",800));
-        s.add(sensor("mic-footwell-left","Footwell reference mic L",AncSensorDefinition.Type.REFERENCE_MIC,AncSensorDefinition.Side.LEFT,"Front footwell · left", "usb-audio",48000));
-        s.add(sensor("mic-footwell-right","Footwell reference mic R",AncSensorDefinition.Type.REFERENCE_MIC,AncSensorDefinition.Side.RIGHT,"Front footwell · right","usb-audio",48000));
-        s.add(sensor("mic-bpillar-left","B-pillar error mic L",AncSensorDefinition.Type.ERROR_MIC,AncSensorDefinition.Side.LEFT,"B-pillar · left ear-height", "usb-audio",48000));
-        s.add(sensor("mic-bpillar-right","B-pillar error mic R",AncSensorDefinition.Type.ERROR_MIC,AncSensorDefinition.Side.RIGHT,"B-pillar · right ear-height","usb-audio",48000));
-        s.add(sensor("output-left","Cancellation output L",AncSensorDefinition.Type.OUTPUT_CHANNEL,AncSensorDefinition.Side.LEFT,"Vehicle audio · left channel","android-audio",48000));
-        s.add(sensor("output-right","Cancellation output R",AncSensorDefinition.Type.OUTPUT_CHANNEL,AncSensorDefinition.Side.RIGHT,"Vehicle audio · right channel","android-audio",48000));
+        s.add(input("accel-front-tunnel","ADXL345 front / tunnel",AncSensorDefinition.Type.ADXL345,AncSensorDefinition.Side.CENTER,"Front transmission tunnel","RP2040 SPI · CS0","spi:cs0",-1,800));
+        s.add(input("accel-rear","ADXL345 rear",AncSensorDefinition.Type.ADXL345,AncSensorDefinition.Side.CENTER,"Rear floor / transmission tunnel","RP2040 SPI · CS1","spi:cs1",-1,800));
+        s.add(input("mic-footwell-left","Mic 1 · reference L",AncSensorDefinition.Type.REFERENCE_MIC,AncSensorDefinition.Side.LEFT,"Front footwell · left","TLV320ADC5140 TDM → RP2040 USB","adc5140",0,48000));
+        s.add(input("mic-footwell-right","Mic 2 · reference R",AncSensorDefinition.Type.REFERENCE_MIC,AncSensorDefinition.Side.RIGHT,"Front footwell · right","TLV320ADC5140 TDM → RP2040 USB","adc5140",1,48000));
+        s.add(input("mic-bpillar-left","Mic 3 · error L",AncSensorDefinition.Type.ERROR_MIC,AncSensorDefinition.Side.LEFT,"B-pillar · left ear-height","TLV320ADC5140 TDM → RP2040 USB","adc5140",2,48000));
+        s.add(input("mic-bpillar-right","Mic 4 · error R",AncSensorDefinition.Type.ERROR_MIC,AncSensorDefinition.Side.RIGHT,"B-pillar · right ear-height","TLV320ADC5140 TDM → RP2040 USB","adc5140",3,48000));
+        s.add(output("output-left","Cancellation output L",AncSensorDefinition.Side.LEFT));
+        s.add(output("output-right","Cancellation output R",AncSensorDefinition.Side.RIGHT));
         return s;
     }
 
-    private AncSensorDefinition sensor(String id,String name,AncSensorDefinition.Type type,AncSensorDefinition.Side side,String location,String transport,int rate){
-        AncSensorDefinition s=new AncSensorDefinition();s.id=id;s.name=name;s.type=type;s.side=side;s.location=location;s.transport=transport;s.sampleRateHz=rate;s.enabled=true;s.connected=false;return s;
+    private AncSensorDefinition input(String id,String name,AncSensorDefinition.Type type,AncSensorDefinition.Side side,String location,String transport,String deviceKey,int channel,int rate){
+        AncSensorDefinition s=new AncSensorDefinition();s.id=id;s.name=name;s.type=type;s.side=side;s.location=location;s.transport=transport;s.deviceKey=deviceKey;s.channelIndex=channel;s.clockDomain=RP2040_CLOCK_DOMAIN;s.sampleRateHz=rate;s.enabled=true;s.connected=false;return s;
+    }
+    private AncSensorDefinition output(String id,String name,AncSensorDefinition.Side side){
+        AncSensorDefinition s=new AncSensorDefinition();s.id=id;s.name=name;s.type=AncSensorDefinition.Type.OUTPUT_CHANNEL;s.side=side;s.location="Vehicle speakers · "+side.name().toLowerCase();s.transport="Android audio → head unit";s.clockDomain="android-output";s.sampleRateHz=48000;s.outputRoute=AncSensorDefinition.OutputRoute.UNASSIGNED;s.enabled=true;s.connected=false;return s;
     }
     private String normalize(String p){if(ProfileStore.PROFILE_E46.equalsIgnoreCase(p))return ProfileStore.PROFILE_E46;if(ProfileStore.PROFILE_HEADPHONES.equalsIgnoreCase(p))return ProfileStore.PROFILE_HEADPHONES;return ProfileStore.PROFILE_P38;}
 }
