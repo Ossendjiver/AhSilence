@@ -10,6 +10,7 @@ public final class SensorCalibrationEngine {
     public record AccelerometerCalibration(AxisCalibration x,AxisCalibration y,AxisCalibration z,double quality){}
     public record LatencyCalibration(int lagSamples,double lagMs,double correlation,double gain){}
     public record MicrophoneCalibration(double gain,double measuredRms,double targetRms,double quality){}
+    public record OutputRouteLatencyCalibration(long medianLatencyUs,long p95JitterUs,long maxJitterUs,double confidence,int observations){}
 
     /** Six-face ADXL345 calibration. Inputs are mean g readings for +X,-X,+Y,-Y,+Z,-Z stationary poses. */
     public static AccelerometerCalibration calibrateAdxl345(double[] plusMinusMeans){
@@ -53,6 +54,22 @@ public final class SensorCalibrationEngine {
         double rms=Math.sqrt(ss/samples.length),gain=targetRms/Math.max(rms,1e-9);
         double crest=peak/Math.max(rms,1e-9);double q=clamp(1.0-Math.max(0,crest-12.0)/24.0,0,1);
         return new MicrophoneCalibration(gain,rms,targetRms,q);
+    }
+
+    /**
+     * Characterise an asynchronous speaker route from repeated end-to-end latency observations.
+     * The median is the deterministic delay the controller can compensate. Jitter is kept separately
+     * because a long but stable AUX/AA route can still be predictable, while a shorter variable route may not be.
+     */
+    public static OutputRouteLatencyCalibration calibrateOutputRoute(long... measuredLatencyUs){
+        if(measuredLatencyUs==null||measuredLatencyUs.length<5)throw new IllegalArgumentException("need at least five route-latency observations");
+        long[] v=Arrays.copyOf(measuredLatencyUs,measuredLatencyUs.length);Arrays.sort(v);
+        long median=v[v.length/2];long[] dev=new long[v.length];long max=0;
+        for(int i=0;i<v.length;i++){dev[i]=Math.abs(v[i]-median);max=Math.max(max,dev[i]);}
+        Arrays.sort(dev);int p95Index=Math.min(dev.length-1,(int)Math.ceil(dev.length*0.95)-1);long p95=dev[Math.max(0,p95Index)];
+        // Confidence rewards repeatability, not absolute latency. 0.5 ms is excellent; >5 ms is poor for broadband phase control.
+        double confidence=clamp(1.0-p95/5000.0,0.0,1.0);
+        return new OutputRouteLatencyCalibration(median,p95,max,confidence,v.length);
     }
 
     /** Align multiple latency measurements to a common monotonic time base. */
