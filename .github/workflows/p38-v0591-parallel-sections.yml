@@ -1,0 +1,73 @@
+name: P38 v0.5.9.1 parallel section probes
+
+on:
+  push:
+    branches:
+      - test/p38-v059-section-replay
+    paths:
+      - '.github/workflows/p38-v0591-parallel-sections.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  replay:
+    strategy:
+      fail-fast: false
+      matrix:
+        section: ['600-780','1200-1380','1800-1980','2370-2550']
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '21'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Download P38 WAV
+        run: |
+          pip install gdown
+          gdown 1NiNG6CORVcKrDd9YZGPVpkCqsQUewG6J -O P38.wav
+      - name: Prepare fixed production logic
+        run: |
+          mkdir -p replay-src/com/p38/anclab/dsp replay-classes results
+          sed 's/System\.currentTimeMillis()/replay.ReplayClock.nowMs()/g' anclab/src/main/java/com/p38/anclab/dsp/VehicleNarrowbandBank.java > replay-src/com/p38/anclab/dsp/VehicleNarrowbandBank.java
+          python - <<'PY'
+          from pathlib import Path
+          p=Path('replay-src/com/p38/anclab/dsp/VehicleNarrowbandBank.java'); s=p.read_text()
+          old='''                DiscoveredLane replace=null;\n                if(discovered.size()>=fallbackLaneLimit())replace=findReplaceableLane(candidate,now);\n                if(discovered.size()>=fallbackLaneLimit()&&replace==null)continue;'''
+          new='''                DiscoveredLane replace=null;\n                int controllerSlots=discoveredControllerSlotCount();\n                boolean candidateCancellable=FrequencyLanePolicy.cancellable(candidate.frequencyHz(),\n                        cancellationMinimumHz,cancellationMaximumHz);\n                if(candidateCancellable&&controllerSlots>=fallbackLaneLimit())replace=findReplaceableLane(candidate,now);\n                if(candidateCancellable&&controllerSlots>=fallbackLaneLimit()&&replace==null)continue;'''
+          if old not in s: raise SystemExit('capacity block not found')
+          s=s.replace(old,new,1)
+          marker='''    private int fallbackLaneLimit(){\n        return broadbandEnabled?MAX_DISCOVERED_LANES_BROADBAND:MAX_DISCOVERED_LANES_NARROWBAND_ONLY;\n    }\n'''
+          helper=marker+'''\n    private int discoveredControllerSlotCount(){ int count=0; for(DiscoveredLane lane:discovered)if(lane.cancellable)count++; return count; }\n'''
+          p.write_text(s.replace(marker,helper,1))
+          PY
+      - name: Compile replay
+        run: |
+          javac -d replay-classes \
+            tools/replaystubs/com/p38/anclab/profile/MechanicalFrequency.java \
+            tools/replaystubs/com/p38/anclab/telemetry/VehicleTelemetryRuntime.java \
+            anclab/src/main/java/com/p38/anclab/profile/VehicleCancellationRecipe.java \
+            anclab/src/main/java/com/p38/anclab/dsp/Complex.java \
+            anclab/src/main/java/com/p38/anclab/dsp/SpectrumSnapshot.java \
+            anclab/src/main/java/com/p38/anclab/dsp/Radix2Spectrum.java \
+            anclab/src/main/java/com/p38/anclab/dsp/SpectrumAnalyzer.java \
+            anclab/src/main/java/com/p38/anclab/dsp/AdaptiveFrequencyTracker.java \
+            anclab/src/main/java/com/p38/anclab/dsp/AutoController.java \
+            anclab/src/main/java/com/p38/anclab/dsp/ButterworthLowPass.java \
+            anclab/src/main/java/com/p38/anclab/dsp/DcBlocker.java \
+            anclab/src/main/java/com/p38/anclab/dsp/FrequencyLanePolicy.java \
+            anclab/src/main/java/com/p38/anclab/dsp/BroadbandDetector.java \
+            anclab/src/main/java/com/p38/anclab/dsp/VehicleRecipeBook.java \
+            anclab/src/main/java/com/p38/anclab/dsp/VehicleLaneRegistry.java \
+            tools/replay/ReplayClock.java replay-src/com/p38/anclab/dsp/VehicleNarrowbandBank.java tools/replay/P38MultiSectionReplay.java
+      - name: Replay ${{ matrix.section }}
+        run: java -cp replay-classes replay.P38MultiSectionReplay P38.wav results/${{ matrix.section }}.csv ${{ matrix.section }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: P38-v0591-${{ matrix.section }}
+          path: results/**
+          retention-days: 14
