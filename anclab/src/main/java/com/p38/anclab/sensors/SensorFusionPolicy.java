@@ -12,15 +12,25 @@ public final class SensorFusionPolicy {
     }
 
     /**
-     * Sensor-primary stereo requires, on each side, a calibrated acoustic reference, error mic and
-     * repeatably calibrated output route. Shared CENTER accelerometers supplement both sides but do
-     * not by themselves replace the sided reference microphones. All acoustic inputs must share the
-     * same synchronous RP2040 clock domain. Until then legacy ANC remains fully independent.
+     * Sensor-primary stereo requires the complete explicitly-required hardware set, a shared acoustic
+     * input clock, and on each side a calibrated reference/error/output path. Later sensors can be
+     * added as optional learning channels before being promoted to required status.
      */
     public static boolean stereoReady(List<AncSensorDefinition> sensors){
-        return commonAcousticInputClock(sensors)!=null
+        return requiredSensorsReady(sensors)
+                &&commonAcousticInputClock(sensors)!=null
                 &&sideReady(sensors,AncSensorDefinition.Side.LEFT)
                 &&sideReady(sensors,AncSensorDefinition.Side.RIGHT);
+    }
+
+    public static boolean requiredSensorsReady(List<AncSensorDefinition> sensors){
+        if(sensors==null)return false;boolean anyRequired=false;
+        for(AncSensorDefinition s:sensors){
+            if(s==null||!s.enabled||!s.requiredForPrimary)continue;anyRequired=true;
+            if(!s.connected||s.calibrationState!=AncSensorDefinition.CalibrationState.CALIBRATED)return false;
+            if(s.isOutput()&&(s.outputRoute==AncSensorDefinition.OutputRoute.UNASSIGNED||s.latencyConfidence<0.60))return false;
+        }
+        return anyRequired;
     }
 
     public static String commonAcousticInputClock(List<AncSensorDefinition> sensors){
