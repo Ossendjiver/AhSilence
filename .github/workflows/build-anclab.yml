@@ -20,7 +20,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-java@v4
+      - uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: '21'
@@ -62,7 +62,7 @@ jobs:
       - name: Upload ANC Lab APK
         uses: actions/upload-artifact@v4
         with:
-          name: ANC-Lab-v0.5.9-rebuild-debug
+          name: ANC-Lab-v0.5.9.1-rebuild-debug
           path: anclab/build/outputs/apk/debug/anclab-debug.apk
           if-no-files-found: error
           retention-days: 14
