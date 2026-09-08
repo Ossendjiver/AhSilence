@@ -19,4 +19,20 @@ public final class SensorCalibrationEngineTest {
         SensorCalibrationEngine.LatencyCalibration c=SensorCalibrationEngine.estimateLatency(x,y,48000,200);
         assertEquals(lag,c.lagSamples());assertTrue(Math.abs(c.correlation())>0.99);assertEquals(0.6,c.gain(),0.01);
     }
+
+    @Test public void characterizesLongButStableOutputRouteSeparatelyFromJitter(){
+        SensorCalibrationEngine.OutputRouteLatencyCalibration c=SensorCalibrationEngine.calibrateOutputRoute(
+                82300,82400,82250,82350,82500,82150,82300,82450,82200,82350);
+        assertTrue(c.medianLatencyUs()>82000&&c.medianLatencyUs()<82600);
+        assertTrue(c.p95JitterUs()<500);
+        assertTrue(c.confidence()>0.90);
+        assertEquals(10,c.observations());
+    }
+
+    @Test public void identifiesVariableRouteAsLowConfidence(){
+        SensorCalibrationEngine.OutputRouteLatencyCalibration c=SensorCalibrationEngine.calibrateOutputRoute(
+                50000,52000,47000,57000,45000,55000,49000,53000,44000,58000);
+        assertTrue(c.p95JitterUs()>5000);
+        assertTrue(c.confidence()<0.50);
+    }
 }
