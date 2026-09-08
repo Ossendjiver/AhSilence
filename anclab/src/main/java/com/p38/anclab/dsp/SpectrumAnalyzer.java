@@ -71,8 +71,10 @@ public final class SpectrumAnalyzer {
         return new Complex(sumReal*scale,sumImaginary*scale);
     }
 
-    public static double linearToDb(double value){return 20.0*Math.log10(Math.max(Math.abs(value),1.0e-6));}
-    public record DetectedTone(double frequencyHz,double amplitude,double dbFs) { }
+    public static double linearToDb(double value){return 20.0*Math.log10(Math.max(Math.abs(value),1.0e-12));}
+    public record DetectedTone(double frequencyHz,double amplitude,double dbFs,double localFloorDbFs,double prominenceDb) {
+        public DetectedTone(double frequencyHz,double amplitude,double dbFs){this(frequencyHz,amplitude,dbFs,-120.0,Math.max(0.0,dbFs+120.0));}
+    }
 
     public static List<DetectedTone> findPeaks(float[] samples,long firstSampleIndex,double sampleRateHz,
             double minimumHz,double maximumHz,int maximumPeaks,double minimumSeparationHz){
@@ -80,7 +82,8 @@ public final class SpectrumAnalyzer {
         List<DetectedTone> candidates=new ArrayList<>();
         for(Radix2Spectrum.Peak peak:Radix2Spectrum.findPeaks(samples,sampleRateHz,minimumHz,maximumHz,
                 Math.max(maximumPeaks*3,maximumPeaks),minimumSeparationHz))
-            candidates.add(new DetectedTone(peak.frequencyHz(),peak.amplitude(),linearToDb(peak.amplitude())));
+            candidates.add(new DetectedTone(peak.frequencyHz(),peak.amplitude(),linearToDb(peak.amplitude()),
+                    linearToDb(peak.noiseFloorAmplitude()),peak.prominenceDb()));
         List<DetectedTone> selected=new ArrayList<>();
         for(DetectedTone candidate:candidates){
             boolean separated=true;
