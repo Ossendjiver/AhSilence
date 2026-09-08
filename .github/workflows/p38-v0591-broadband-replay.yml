@@ -1,0 +1,52 @@
+name: P38 v0.5.9.1 predictive broadband replay
+
+on:
+  push:
+    branches:
+      - test/p38-v059-section-replay
+    paths:
+      - 'tools/replay/P38BroadbandClosedLoopReplay.java'
+      - '.github/workflows/p38-v0591-broadband-replay.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  replay:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        section: ['20-200','300-480','600-780','900-1080','1200-1380','1500-1680','1800-1980','2100-2280','2370-2550']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '21'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Download P38 WAV
+        run: |
+          pip install gdown
+          gdown 1NiNG6CORVcKrDd9YZGPVpkCqsQUewG6J -O P38.wav
+      - name: Compile broadband replay
+        run: |
+          mkdir -p replay-classes
+          javac -d replay-classes \
+            anclab/src/main/java/com/p38/anclab/dsp/DcBlocker.java \
+            anclab/src/main/java/com/p38/anclab/dsp/HeadphoneBandLimiter.java \
+            anclab/src/main/java/com/p38/anclab/dsp/PredictableFrequencyExcluder.java \
+            anclab/src/main/java/com/p38/anclab/dsp/FeedbackFxNlms.java \
+            tools/replay/P38BroadbandClosedLoopReplay.java
+      - name: Replay ${{ matrix.section }}
+        shell: bash
+        run: |
+          START="${{ matrix.section }}"; A="${START%-*}"; B="${START#*-}"
+          java -cp replay-classes replay.P38BroadbandClosedLoopReplay P38.wav "$A" "$B" | tee broadband-${{ matrix.section }}.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: P38-broadband-${{ matrix.section }}
+          path: broadband-${{ matrix.section }}.txt
+          retention-days: 14
