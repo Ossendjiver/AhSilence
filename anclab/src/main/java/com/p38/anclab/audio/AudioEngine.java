@@ -14,6 +14,7 @@ import android.media.MediaRecorder;
 import android.os.Build;
 
 import com.p38.anclab.dsp.FeedbackFxNlms;
+import com.p38.anclab.dsp.FixedToneCancellationLab;
 import com.p38.anclab.dsp.HeadphoneFeedforwardFxNlms;
 import com.p38.anclab.dsp.HeadphoneToneBank;
 import com.p38.anclab.dsp.StationaryNoiseProfiler;
@@ -44,8 +45,9 @@ public final class AudioEngine {
     private static final String TAG="AudioEngine";
     private static final int GRAPH_POINTS=720;
     private static final int GRAPH_DECIMATION=24;
+    private static final float ROOM_MIN_CANCELLATION_HZ=40f;
 
-    private enum Mode { NONE, HEADPHONES, VEHICLE }
+    private enum Mode { NONE, HEADPHONES, VEHICLE, ROOM, TONE_LAB }
     private final Context context;
     private final AudioManager audioManager;
     private final AncStorage storage;
@@ -69,6 +71,7 @@ public final class AudioEngine {
     private FeedbackFxNlms vehicleFx;
     private VehicleNarrowbandBank vehicleNarrowband;
     private PredictableFrequencyExcluder vehicleExcluder;
+    private FixedToneCancellationLab fixedToneLab;
     private volatile boolean vehicleBroadbandEnabled=false;
     private volatile int antiNoisePercent=50;
     private volatile float inputRms=0f,outputRms=0f;
@@ -85,6 +88,7 @@ public final class AudioEngine {
     private int observedSafetyTrips=0,safetyTripsInWindow=0;
     private long safetyWindowStartMs=0L;
     private long lastVehicleFrequencyRevision=-1L,lastVehicleExcluderUpdateMs=0L;
+    private int digitalSilenceFrames=0;
 
     private final Object graphLock=new Object();
     private final float[] graphReference=new float[GRAPH_POINTS],graphDrive=new float[GRAPH_POINTS],graphPredictedCancellation=new float[GRAPH_POINTS],graphPredictedResidual=new float[GRAPH_POINTS];
@@ -125,6 +129,8 @@ public final class AudioEngine {
     public float getInputRms(){return inputRms;} public float getOutputRms(){return outputRms;}
     public String getLastError(){return lastError;} public String getSafetyStatus(){return safetyStatus;}
     public boolean isRunning(){return running.get();} public String getActiveProfile(){return activeProfile;}
+    public boolean isFixedToneLab(){return mode==Mode.TONE_LAB&&running.get();}
+    public double getFixedToneLabFrequencyHz(){FixedToneCancellationLab lab=fixedToneLab;return lab==null?Double.NaN:lab.targetFrequencyHz();}
     public boolean isVehicleBroadbandEnabled(){return vehicleBroadbandEnabled;}
     public int getAntiNoisePercent(){return antiNoisePercent;}
     public void setMonitorLogEnabled(boolean enabled){monitorLogEnabled=enabled;}
@@ -135,16 +141,16 @@ public final class AudioEngine {
         antiNoisePercent=Math.max(0,Math.min(100,percent));float scale=antiNoisePercent/100f;
         HeadphoneFeedforwardFxNlms h=headphoneFx;if(h!=null)h.setUserOutputScale(scale);HeadphoneToneBank ht=headphoneTones;if(ht!=null)ht.setUserOutputScale(scale);
         FeedbackFxNlms v=vehicleFx;if(v!=null)v.setUserOutputScale(scale);
-        VehicleNarrowbandBank n=vehicleNarrowband;if(n!=null)n.setUserOutputScale(scale);
+        VehicleNarrowbandBank n=vehicleNarrowband;if(n!=null)n.setUserOutputScale(scale);FixedToneCancellationLab lab=fixedToneLab;if(lab!=null)lab.setUserOutputScale(scale);
     }
 
     /** Optional speculative vehicle broadband can be toggled live; narrowband lanes keep running. */
     public synchronized void setVehicleBroadbandEnabled(boolean enabled){
         vehicleBroadbandEnabled=enabled;
         VehicleNarrowbandBank bank=vehicleNarrowband;if(bank!=null)bank.setBroadbandEnabled(enabled);
-        if(mode!=Mode.VEHICLE||!running.get())return;
-        if(!enabled){vehicleFx=null;safetyStatus="Speculative broadband OFF · telemetry narrowband lanes continue";}
-        else if(calibration!=null){vehicleFx=new FeedbackFxNlms(calibration.secondaryPath,calibration.delaySamples,128,calibration.safeOutputCeiling);configureVehicleFx(vehicleFx);if(bank!=null)vehicleFx.setExcludedFrequencies(bank.frequenciesHz());safetyStatus="Speculative broadband ON · live predictable lane bands excluded";}
+        if((mode!=Mode.VEHICLE&&mode!=Mode.ROOM)||!running.get())return;
+        if(!enabled){vehicleFx=null;safetyStatus=mode==Mode.ROOM?"Room broadband OFF · learned narrowband lanes continue":"Speculative broadband OFF · telemetry narrowband lanes continue";}
+        else if(calibration!=null){vehicleFx=new FeedbackFxNlms(calibration.secondaryPath,calibration.delaySamples,128,calibration.safeOutputCeiling);configureVehicleFx(vehicleFx);if(bank!=null)vehicleFx.setExcludedFrequencies(bank.frequenciesHz());safetyStatus=mode==Mode.ROOM?"Room broadband ON · direct residual adaptation active":"Speculative broadband ON · live predictable lane bands excluded";}
     }
 
     public GraphSnapshot getGraphSnapshot(){synchronized(graphLock){int n=graphCount;float[] r=new float[n],d=new float[n],c=new float[n],e=new float[n];int start=(graphWrite-n+GRAPH_POINTS)%GRAPH_POINTS;for(int i=0;i<n;i++){int p=(start+i)%GRAPH_POINTS;r[i]=graphReference[p];d[i]=graphDrive[p];c[i]=graphPredictedCancellation[p];e[i]=graphPredictedResidual[p];}return new GraphSnapshot(r,d,c,e,SAMPLE_RATE/(float)GRAPH_DECIMATION,running.get());}}
@@ -152,7 +158,7 @@ public final class AudioEngine {
     @SuppressLint("MissingPermission")
     public CalibrationResult calibrateHeadphones(){return calibrateRoute(ProfileStore.PROFILE_HEADPHONES);}
 
-    /** Measure selected output -> selected microphone path for Headphones, P38 or E46. */
+    /** Measure selected output -> selected microphone path for Headphones, Room, P38 or E46. */
     @SuppressLint("MissingPermission")
     public CalibrationResult calibrateRoute(String profileId){
         if(context.checkSelfPermission(Manifest.permission.RECORD_AUDIO)!=PackageManager.PERMISSION_GRANTED)return new CalibrationResult(false,null,"Microphone permission is required");
@@ -179,7 +185,7 @@ public final class AudioEngine {
             if(best<0.025){saveCalibrationWavs(probe,captured);return new CalibrationResult(false,null,"Calibration probe was not detected clearly enough (quality "+String.format(Locale.US,"%.0f%%",best*100)+")");}
             int firLen=128;float[] h=new float[firLen],xh=new float[firLen];int xp=0;float mu=0.35f;int nFit=Math.min(probeLen-256,total-lead-bestLag-256);
             for(int nn=0;nn<nFit;nn++){float xx=probe[lead+nn];xh[xp]=xx;float yh=0,norm=1e-7f;int p=xp;for(int k=0;k<firLen;k++){yh+=h[k]*xh[p];norm+=xh[p]*xh[p];if(--p<0)p=firLen-1;}float target=captured[lead+bestLag+nn],err=target-yh,step=mu*err/norm;p=xp;for(int k=0;k<firLen;k++){h[k]+=step*xh[p];if(--p<0)p=firLen-1;}if(++xp==firLen)xp=0;}
-            HeadphoneCalibration c=new HeadphoneCalibration();c.profileId=activeProfile;c.sampleRateHz=SAMPLE_RATE;c.inputDeviceId=inputDeviceId;c.outputDeviceId=outputDeviceId;c.inputRoute=inputRoute;c.outputRoute=outputRoute;c.delaySamples=bestLag;c.quality=(float)best;c.utcMs=System.currentTimeMillis();c.secondaryPath=h;c.safeOutputCeiling=ProfileStore.PROFILE_HEADPHONES.equals(activeProfile)?(bestLag>2400?0.12f:0.18f):0.08f;c.minimumCancellationHz=ProfileStore.PROFILE_HEADPHONES.equals(activeProfile)?15f:20f;c.maximumCancellationHz=ProfileStore.PROFILE_HEADPHONES.equals(activeProfile)?600f:200f;c.frequencyBandVerified=false;c.mediaVolumeIndex=volumeStart.index;c.mediaVolumeMax=volumeStart.max;c.mediaVolumeDb=volumeStart.db;calibration=c;saveCalibrationWavs(probe,captured);
+            HeadphoneCalibration c=new HeadphoneCalibration();c.profileId=activeProfile;c.sampleRateHz=SAMPLE_RATE;c.inputDeviceId=inputDeviceId;c.outputDeviceId=outputDeviceId;c.inputRoute=inputRoute;c.outputRoute=outputRoute;c.delaySamples=bestLag;c.quality=(float)best;c.utcMs=System.currentTimeMillis();c.secondaryPath=h;c.safeOutputCeiling=ProfileStore.PROFILE_HEADPHONES.equals(activeProfile)?(bestLag>2400?0.12f:0.18f):0.08f;c.minimumCancellationHz=ProfileStore.PROFILE_HEADPHONES.equals(activeProfile)?15f:ProfileStore.PROFILE_ROOM.equals(activeProfile)?ROOM_MIN_CANCELLATION_HZ:20f;c.maximumCancellationHz=ProfileStore.PROFILE_HEADPHONES.equals(activeProfile)?600f:200f;c.frequencyBandVerified=false;c.mediaVolumeIndex=volumeStart.index;c.mediaVolumeMax=volumeStart.max;c.mediaVolumeDb=volumeStart.db;calibration=c;saveCalibrationWavs(probe,captured);
             AppLog.i(TAG,"Route calibration complete profile="+activeProfile+" delay="+bestLag+" samples quality="+best+" signedCorr="+bestSigned+" mediaDb="+volumeStart.db);
             return new CalibrationResult(true,c,"Calibration complete");
         }catch(Exception e){lastError=e.getMessage();AppLog.e(TAG,"Calibration failed",e);return new CalibrationResult(false,null,"Calibration failed: "+e.getMessage());}
@@ -193,10 +199,29 @@ public final class AudioEngine {
     @SuppressLint("MissingPermission")
     public synchronized boolean startVehicleAnc(String profileId,boolean broadbandEnabled,List<MechanicalFrequency> mechanicalModels){if(calibration==null){lastError="No stored vehicle route calibration";return false;}return startInternal(Mode.VEHICLE,profileId,broadbandEnabled,mechanicalModels==null?List.of():mechanicalModels);}
 
+    @SuppressLint("MissingPermission")
+    public synchronized boolean startRoomAnc(boolean broadbandEnabled){if(calibration==null){lastError="No stored room route calibration";return false;}return startInternal(Mode.ROOM,ProfileStore.PROFILE_ROOM,broadbandEnabled,List.of());}
+
+    /** Fixed-frequency physical-search bench mode. No route calibration, telemetry or recipes. */
+    @SuppressLint("MissingPermission")
+    public synchronized boolean startFixedToneLab(double frequencyHz){
+        if(running.get())return true;
+        try{
+            mode=Mode.TONE_LAB;activeProfile=String.format(Locale.US,"%.0fHZ_LAB",frequencyHz);vehicleBroadbandEnabled=false;safetyStatus="";lastError="None";digitalSilenceFrames=0;
+            record=buildRecord();track=buildTrack();if(record==null||track==null)throw new IllegalStateException("Could not open selected audio route");
+            clearGraph();record.startRecording();track.play();track.write(new float[192],0,192,AudioTrack.WRITE_BLOCKING);
+            AudioDeviceInfo routed=track.getRoutedDevice();expectedOutputRouteId=routed==null?0:routed.getId();routeMissingBlocks=0;routeGainCompensation=1f;
+            fixedToneLab=new FixedToneCancellationLab(frequencyHz);fixedToneLab.setUserOutputScale(antiNoisePercent/100f);
+            stationaryNoiseProfiler.reset();running.set(true);if(monitorLogEnabled)monitoringLog.start();
+            worker=new Thread(this::runLoop,"ANC-Lab-FixedTone");worker.setPriority(Thread.MAX_PRIORITY);worker.start();
+            safetyStatus=String.format(Locale.US,"%.0f Hz lab · muted A/B physical search starting",frequencyHz);AppLog.i(TAG,String.format(Locale.US,"%.0f Hz cancellation lab started route=%s limit=%d%%",frequencyHz,outputRoute,antiNoisePercent));return true;
+        }catch(Exception e){lastError=e.getMessage();AppLog.e(TAG,"Fixed-tone lab start failed",e);stop();return false;}
+    }
+
     private boolean startInternal(Mode requested,String profileId,boolean broadbandEnabled,List<MechanicalFrequency> mechanicalModels){
         if(running.get())return true;
         try{
-            mode=requested;activeProfile=profileId;vehicleBroadbandEnabled=broadbandEnabled;safetyStatus="";lastError="None";
+            mode=requested;activeProfile=profileId;vehicleBroadbandEnabled=broadbandEnabled;safetyStatus="";lastError="None";digitalSilenceFrames=0;
             record=buildRecord();track=buildTrack();if(record==null||track==null)throw new IllegalStateException("Could not open selected audio route");
             clearGraph();record.startRecording();track.play();track.write(new float[192],0,192,AudioTrack.WRITE_BLOCKING);
             AudioDeviceInfo routed=track.getRoutedDevice();
@@ -204,15 +229,23 @@ public final class AudioEngine {
                 if(routed==null||!isHeadphoneLike(routed.getType()))throw new IllegalStateException("ANC stopped: output is not routed to headphones");
                 headphoneFx=new HeadphoneFeedforwardFxNlms(calibration.secondaryPath,calibration.delaySamples,calibration.safeOutputCeiling);headphoneFx.setAdaptationRate(calibration.delaySamples>2400?0.012f:0.035f);headphoneFx.setUserOutputScale(antiNoisePercent/100f);headphoneTones=new HeadphoneToneBank(calibration.safeOutputCeiling,antiNoisePercent/100f);stationaryNoiseProfiler.reset();lastHeadphoneToneRevision=-1L;
             }else{
-                if(vehicleTelemetry==null)throw new IllegalStateException("Vehicle telemetry runtime is unavailable");
-                vehicleTelemetry.activateProfile(profileId,mechanicalModels);
-                vehicleNarrowband=new VehicleNarrowbandBank(mechanicalModels,vehicleTelemetry,
+                VehicleTelemetryRuntime telemetryForBank=null;
+                boolean room=requested==Mode.ROOM;
+                stationaryNoiseProfiler.reset();
+                if(!room){
+                    if(vehicleTelemetry==null)throw new IllegalStateException("Vehicle telemetry runtime is unavailable");
+                    vehicleTelemetry.activateProfile(profileId,mechanicalModels);telemetryForBank=vehicleTelemetry;
+                }
+                vehicleNarrowband=new VehicleNarrowbandBank(room?List.of():mechanicalModels,telemetryForBank,
                         calibration.safeOutputCeiling,antiNoisePercent/100f,
-                        calibration.minimumCancellationHz,calibration.maximumCancellationHz,
-                        vehicleRecipeRouteKey(),profiles.loadCancellationRecipes(profileId));
+                        room?Math.max(ROOM_MIN_CANCELLATION_HZ,calibration.minimumCancellationHz):calibration.minimumCancellationHz,
+                        calibration.maximumCancellationHz,
+                        vehicleRecipeRouteKey(),profiles.loadCancellationRecipes(profileId),room,
+                        calibration.secondaryPath,calibration.delaySamples,calibration.sampleRateHz);
                 vehicleNarrowband.setBroadbandEnabled(broadbandEnabled);
                 lastVehicleFrequencyRevision=vehicleNarrowband.frequencyRevision();lastVehicleExcluderUpdateMs=System.currentTimeMillis();
                 if(broadbandEnabled){vehicleFx=new FeedbackFxNlms(calibration.secondaryPath,calibration.delaySamples,128,calibration.safeOutputCeiling);configureVehicleFx(vehicleFx);vehicleFx.setExcludedFrequencies(vehicleNarrowband.frequenciesHz());}else vehicleFx=null;
+                if(room)safetyStatus="Room calibrated-path feedback ready · quiet discovery · no blind acoustic probes · 40–200 Hz narrowband";
             }
             expectedOutputRouteId=routed==null?0:routed.getId();routeMissingBlocks=0;initializeVolumeCompensation();
             running.set(true);if(monitorLogEnabled)monitoringLog.start();worker=new Thread(this::runLoop,"ANC-Lab-Audio");worker.setPriority(Thread.MAX_PRIORITY);worker.start();
@@ -229,7 +262,7 @@ public final class AudioEngine {
         int block=192;float[] in=new float[block],out=new float[block];
         while(running.get()){
             int n=record.read(in,0,block,AudioRecord.READ_BLOCKING);if(n==AudioRecord.ERROR_DEAD_OBJECT){lastError="Microphone disconnected · ANC stopped";break;}if(n<=0)continue;
-            if(!routeStillSafe())break;updateVolumeCompensationIfNeeded();double inputEnergy=0,outputEnergy=0;
+            if(!routeStillSafe())break;if(mode!=Mode.TONE_LAB)updateVolumeCompensationIfNeeded();double inputEnergy=0,outputEnergy=0;
             for(int i=0;i<n;i++){
                 float y=0f,ref=0f,cancel=0f,residual=0f;
                 inputEnergy+=in[i]*in[i];stationaryNoiseProfiler.observe(in[i]);
@@ -239,7 +272,9 @@ public final class AudioEngine {
                     headphoneFx.process(in[i]);float broadModel=headphoneFx.diagnosticModelDrive();
                     float totalModelCeiling=calibration.safeOutputCeiling*(antiNoisePercent/100f);float combinedModel=clamp(toneModel+broadModel,-totalModelCeiling,totalModelCeiling);
                     y=clamp(combinedModel*routeGainCompensation,-0.5f,0.5f);ref=headphoneFx.diagnosticReference();cancel=headphoneFx.diagnosticPredictedCancellation()+toneModel;residual=headphoneFx.diagnosticPredictedResidual();
-                }else if(mode==Mode.VEHICLE){
+                }else if(mode==Mode.TONE_LAB&&fixedToneLab!=null){
+                    y=fixedToneLab.process(in[i]);ref=in[i];cancel=y;residual=in[i];
+                }else if(mode==Mode.VEHICLE||mode==Mode.ROOM){
                     float narrowModel=vehicleNarrowband==null?0f:vehicleNarrowband.process(in[i]);
                     float broadModel=0f;
                     if(vehicleBroadbandEnabled&&vehicleFx!=null){vehicleFx.process(in[i]);broadModel=vehicleFx.diagnosticModelDrive();ref=vehicleFx.diagnosticReference();cancel=vehicleFx.diagnosticPredictedCancellation();residual=vehicleFx.diagnosticMeasuredResidual();}
@@ -251,16 +286,30 @@ public final class AudioEngine {
                 out[i]=y;outputEnergy+=y*y;graphSample(ref,y,cancel,residual);
             }
             int w=track.write(out,0,n,AudioTrack.WRITE_BLOCKING);if(w==AudioTrack.ERROR_DEAD_OBJECT){lastError="Audio output disconnected · ANC stopped";break;}if(w<0){lastError="AudioTrack write error "+w;break;}
+            // A physical microphone has analogue/self noise. One full second of exactly zero-valued
+            // float samples means Android has handed us a silent/invalid capture stream, not that the
+            // environment simply contains no discoverable tone. Fail visibly instead of silently
+            // running an empty detector for the rest of the session.
+            if(inputEnergy<=1.0e-20){
+                digitalSilenceFrames+=n;
+                if(digitalSilenceFrames>=SAMPLE_RATE){
+                    lastError="Microphone input is digital silence · ANC stopped · reselect the input route and re-run calibration if it recurs";
+                    safetyStatus=lastError;running.set(false);
+                }
+            }else digitalSilenceFrames=0;
             if(mode==Mode.HEADPHONES&&headphoneFx!=null){inputRms=headphoneFx.inputRms();outputRms=(float)Math.sqrt(outputEnergy/Math.max(1,n));checkSafetyTrips(headphoneFx.safetyTrips(),headphoneFx.safetyStatus());if((safetyStatus==null||safetyStatus.isEmpty())&&headphoneTones!=null)safetyStatus=headphoneTones.status();}
-            else if(mode==Mode.VEHICLE){
+            else if(mode==Mode.TONE_LAB&&fixedToneLab!=null){
+                inputRms=(float)Math.sqrt(inputEnergy/Math.max(1,n));outputRms=(float)Math.sqrt(outputEnergy/Math.max(1,n));safetyStatus=fixedToneLab.status();
+            }
+            else if(mode==Mode.VEHICLE||mode==Mode.ROOM){
                 inputRms=(float)Math.sqrt(inputEnergy/Math.max(1,n));outputRms=(float)Math.sqrt(outputEnergy/Math.max(1,n));
                 if(vehicleFx!=null)checkSafetyTrips(vehicleFx.safetyTrips(),vehicleFx.safetyStatus());
                 updateVehicleBroadbandExclusions();
                 persistVehicleRecipesIfDue();
-                String nb=vehicleNarrowband==null?"":vehicleNarrowband.status();if((safetyStatus==null||safetyStatus.isEmpty()||safetyStatus.startsWith("Predictable narrowband"))&&!nb.isEmpty())safetyStatus=nb+(vehicleBroadbandEnabled?" · broadband ON":" · broadband OFF");
+                String nb=vehicleNarrowband==null?"":vehicleNarrowband.status();if((mode==Mode.ROOM||safetyStatus==null||safetyStatus.isEmpty()||safetyStatus.startsWith("Predictable narrowband"))&&!nb.isEmpty())safetyStatus=nb+(vehicleBroadbandEnabled?" · broadband ON":" · broadband OFF");
             }
             StationaryNoiseProfiler.Snapshot noise=stationaryNoiseProfiler.snapshot();String toneSummary=headphoneTones==null?"":headphoneTones.status();double confidence=headphoneFx==null?Double.NaN:headphoneFx.predictorConfidence();recorder.onAudio(in,out,n,new SessionRecorder.Diagnostics(noise.ancBandRmsDbFs(),confidence,toneSummary,noise.status(),safetyStatus));
-            String algorithm=mode==Mode.HEADPHONES?"HEADPHONE_TONES_PLUS_PREDICTIVE_FXNLMS_15_600":vehicleBroadbandEnabled?"VEHICLE_TELEMETRY_NARROWBAND_PLUS_MEASURED_ERROR_BROADBAND":"VEHICLE_TELEMETRY_NARROWBAND";
+            String algorithm=mode==Mode.TONE_LAB?"FIXED_TONE_PHYSICAL_PHASE_GAIN_SEARCH":mode==Mode.HEADPHONES?"HEADPHONE_TONES_PLUS_PREDICTIVE_FXNLMS_15_600":mode==Mode.ROOM?(vehicleBroadbandEnabled?"ROOM_DIRECT_ERROR_NARROWBAND_PLUS_MEASURED_ERROR_BROADBAND":"ROOM_DIRECT_ERROR_NARROWBAND"):vehicleBroadbandEnabled?"VEHICLE_TELEMETRY_NARROWBAND_PLUS_MEASURED_ERROR_BROADBAND":"VEHICLE_TELEMETRY_NARROWBAND";
             monitoringLog.sample(System.currentTimeMillis(),inputRms,outputRms,algorithm,inputRoute,outputRoute);
         }
         running.set(false);try{if(track!=null){track.pause();track.flush();}}catch(Exception ignored){}
@@ -282,7 +331,9 @@ public final class AudioEngine {
 
     private String vehicleRecipeRouteKey(){
         long revision=calibration==null?0L:calibration.utcMs;
-        return activeProfile+"|in="+inputDeviceId+"|out="+outputDeviceId+"|cal="+revision;
+        String key=activeProfile+"|in="+inputDeviceId+"|out="+outputDeviceId+"|cal="+revision;
+        // v2 invalidates recipes learned by the older blind-probe path in P38/E46 as well as Room.
+        return key+"|narrowPath=cal-v2";
     }
 
     private void checkSafetyTrips(int trips,String status){if(trips<=observedSafetyTrips)return;observedSafetyTrips=trips;safetyStatus=status;lastError=status;long now=System.currentTimeMillis();if(now-safetyWindowStartMs>15000){safetyWindowStartMs=now;safetyTripsInWindow=0;}safetyTripsInWindow++;if(safetyTripsInWindow>=3){lastError="ANC safety stop · repeated feedback/runaway detected";safetyStatus=lastError;running.set(false);}}
@@ -305,7 +356,7 @@ public final class AudioEngine {
     private AudioDeviceInfo findOutputDevice(int id){if(id==0)return null;for(AudioDeviceInfo d:audioManager.getDevices(AudioManager.GET_DEVICES_OUTPUTS))if(d.getId()==id)return d;return null;}
     private static boolean sameDb(float a,float b){return(!Float.isFinite(a)&&!Float.isFinite(b))||(Float.isFinite(a)&&Float.isFinite(b)&&Math.abs(a-b)<0.01f);}
 
-    public synchronized void stop(){running.set(false);if(worker!=null&&worker!=Thread.currentThread()){try{worker.join(700);}catch(Exception ignored){}}worker=null;persistVehicleRecipesNow();try{if(record!=null){record.stop();record.release();}}catch(Exception ignored){}try{if(track!=null){track.pause();track.flush();track.stop();track.release();}}catch(Exception ignored){}record=null;track=null;headphoneFx=null;headphoneTones=null;lastHeadphoneToneRevision=-1L;vehicleFx=null;vehicleNarrowband=null;vehicleExcluder=null;mode=Mode.NONE;monitoringLog.stop();if(recorder.isActive())recorder.stop();inputRms=outputRms=0f;expectedOutputRouteId=0;observedSafetyTrips=safetyTripsInWindow=0;routeGainCompensation=1f;lastVehicleFrequencyRevision=-1;}
+    public synchronized void stop(){running.set(false);if(worker!=null&&worker!=Thread.currentThread()){try{worker.join(700);}catch(Exception ignored){}}worker=null;persistVehicleRecipesNow();try{if(record!=null){record.stop();record.release();}}catch(Exception ignored){}try{if(track!=null){track.pause();track.flush();track.stop();track.release();}}catch(Exception ignored){}record=null;track=null;headphoneFx=null;headphoneTones=null;lastHeadphoneToneRevision=-1L;vehicleFx=null;vehicleNarrowband=null;vehicleExcluder=null;fixedToneLab=null;mode=Mode.NONE;monitoringLog.stop();if(recorder.isActive())recorder.stop();inputRms=outputRms=0f;expectedOutputRouteId=0;observedSafetyTrips=safetyTripsInWindow=0;routeGainCompensation=1f;lastVehicleFrequencyRevision=-1;digitalSilenceFrames=0;}
 
     private void persistVehicleRecipesNow(){
         VehicleNarrowbandBank bank=vehicleNarrowband;if(bank==null)return;

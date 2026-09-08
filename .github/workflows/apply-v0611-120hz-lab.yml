@@ -1,0 +1,31 @@
+name: Apply ANC v0.6.11 120 Hz lab
+on:
+  push:
+    branches: [ feature/room-anc-v062 ]
+    paths:
+      - 'tools/apply_v0611_120hz_lab.py'
+      - '.github/workflows/apply-v0611-120hz-lab.yml'
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feature/room-anc-v062
+          fetch-depth: 0
+      - name: Apply patch
+        run: python3 tools/apply_v0611_120hz_lab.py
+      - name: Commit changes
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add anclab tools
+          if git diff --cached --quiet; then
+            echo 'No changes to commit'
+          else
+            git commit -m 'Add v0.6.11 fixed 120 Hz physical cancellation lab'
+            git push origin HEAD:feature/room-anc-v062
+          fi

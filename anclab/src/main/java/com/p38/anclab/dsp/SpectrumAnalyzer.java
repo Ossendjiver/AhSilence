@@ -46,7 +46,10 @@ public final class SpectrumAnalyzer {
         double median=sorted[sorted.length/2];
         double peakAmplitude=amplitudes[bestIndex];
         double contrastDb=linearToDb(peakAmplitude/Math.max(median,EPSILON));
-        int targetLength=Math.min(samples.length,Math.max(64,(int)Math.round(sampleRateHz*0.75)));
+        // Control phasor uses a short trailing window so stage-to-stage command changes never
+        // bleed into the next acoustic-path measurement.  Discovery/peak finding still uses the
+        // full ring above; only the complex residual used by AutoController is shortened.
+        int targetLength=Math.min(samples.length,Math.max(64,(int)Math.round(sampleRateHz*0.30)));
         int targetOffset=samples.length-targetLength;
         Complex target=coefficient(samples,firstSampleIndex,sampleRateHz,targetHz,
                 referenceEpochIndex,referencePhaseRadians,targetOffset,targetLength);

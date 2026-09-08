@@ -10,8 +10,8 @@ android {
         applicationId = "com.p38.anclab"
         minSdk = 26
         targetSdk = 35
-        versionCode = 18
-        versionName = "0.6.1-adaptive-discovery-dev"
+        versionCode = 30
+        versionName = "0.6.12-fixed-tone-suite-dev"
     }
 
     signingConfigs {
@@ -41,5 +41,6 @@ android {
 }
 
 dependencies {
+    // ANC v0.6.11 adds a calibration-independent 120 Hz physical phase/gain acceptance harness.
     testImplementation("junit:junit:4.13.2")
 }

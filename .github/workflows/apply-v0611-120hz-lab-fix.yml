@@ -1,0 +1,35 @@
+name: Apply ANC v0.6.11 120 Hz lab fixed
+on:
+  push:
+    branches: [ feature/room-anc-v062 ]
+    paths:
+      - '.github/workflows/apply-v0611-120hz-lab-fix.yml'
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feature/room-anc-v062
+          fetch-depth: 0
+      - name: Fix patch anchor and apply
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('tools/apply_v0611_120hz_lab.py')
+          s=p.read_text()
+          s=s.replace("settingsOutputSpinner,startButton,recordButton,calibrateButton,useStoredButton,graphButton;","controlTab,splTab,settingsTab,startButton,recordButton,calibrateButton,useStoredButton,graphButton;")
+          s=s.replace("settingsOutputSpinner,startButton,recordButton,calibrateButton,useStoredButton,graphButton,toneLabButton;","controlTab,splTab,settingsTab,startButton,recordButton,calibrateButton,useStoredButton,graphButton,toneLabButton;")
+          p.write_text(s)
+          PY
+          python3 tools/apply_v0611_120hz_lab.py
+      - name: Commit changes
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add anclab tools
+          git commit -m 'Add v0.6.11 fixed 120 Hz physical cancellation lab'
+          git push origin HEAD:feature/room-anc-v062

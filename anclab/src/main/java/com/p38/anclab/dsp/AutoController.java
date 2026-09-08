@@ -10,8 +10,8 @@ public final class AutoController {
 
     private enum Stage {
         IDLE, LISTENING, BASELINE, VERIFY_RECIPE, PROBE_POSITIVE, PROBE_NEGATIVE,
-        VERIFY_HALF, VERIFY_FULL, RUNNING, VERIFY_FINE, SEEK_FIRST, SEEK_SECOND,
-        SEEK_RETURN, FOLLOW_VERIFY
+        VERIFY_HALF, VERIFY_FULL, REFINE_POSITIVE, REFINE_NEGATIVE, RUNNING, VERIFY_FINE, SEEK_FIRST, SEEK_SECOND,
+        SEEK_RETURN, FOLLOW_VERIFY, AUDIT_OFF, AUDIT_ON
     }
 
     private static final long LISTEN_MS = 1500;
@@ -21,6 +21,29 @@ public final class AutoController {
     private static final double FOLLOW_DEADBAND_HZ = 0.04;
     private static final double CALIBRATION_RETUNE_HYSTERESIS_HZ = 0.55;
     private static final double RUNNING_VERIFY_HYSTERESIS_HZ = 0.20;
+    private static final double ROOM_MIN_VERIFIED_REDUCTION_DB = 1.0;
+    private static final long ROOM_AUDIT_BASE_INTERVAL_MS = 60000L;
+    private static final long ROOM_AUDIT_SPREAD_MS = 15000L;
+    private static final double ROOM_SOFT_AUDIT_SCALE = 0.35;
+    private static final double ROOM_SOFT_AUDIT_MIN_DELTA_DB = 0.35;
+    private static final double ROOM_VIRTUAL_VERIFY_MIN_DB = 0.45;
+    private static final int ROOM_VIRTUAL_VERIFY_FAILURE_WINDOWS = 12;
+    private static final double ROOM_VIRTUAL_VERIFY_SMOOTHING = 0.18;
+    // A calibrated seed is allowed one tiny local complex-path refinement.  The perturbation is
+    // deliberately far below the old 50%-of-lane blind probe and is only attempted after a real
+    // route calibration exists.
+    private static final double CALIBRATED_REFINE_TARGET_CONTRIBUTION = 0.06;
+    private static final double CALIBRATED_REFINE_MIN_GAIN = 0.00015;
+    private static final double CALIBRATED_REFINE_MAX_GAIN = 0.00150;
+    private static final double CALIBRATED_REFINE_MAX_LANE_FRACTION = 0.12;
+    private static final double CALIBRATED_REFINE_MIN_DELTA_RATIO = 0.025;
+    private static final double CALIBRATED_REFINE_MAX_PATH_RATIO = 32.0;
+    // Room oscillator coefficients are smoothed with a 180 ms time constant.  Wait long enough
+    // that the entire 300 ms control phasor is effectively under the current command.
+    private static final long DIRECT_ERROR_SETTLE_MS = 420L;
+    private static final double INITIAL_VERIFICATION_SCALE = 0.25;
+    private static final double INITIAL_VERIFICATION_MAX_GAIN = 0.0040;
+    private static final double INITIAL_VERIFICATION_MIN_REDUCTION_DB = 0.30;
 
     private Stage stage = Stage.IDLE;
     private long stageStartedMs;
@@ -32,13 +55,20 @@ public final class AutoController {
     private Complex previousCommand = Complex.ZERO;
     private Complex recipeCommand = Complex.ZERO;
     private Complex learnedSecondaryPath = Complex.ZERO;
+    private Complex calibrationPath = Complex.ZERO;
     private boolean usingLearnedSecondaryPath;
+    private boolean runtimeRefinedSecondaryPath;
+    private boolean calibratedRefinementAttempted;
+    private Complex refinementDitherCommand = Complex.ZERO;
+    private Complex refinementPositiveResidual = Complex.ZERO;
     private Complex positiveProbeCommand = Complex.ZERO;
     private Complex positiveProbeResidual = Complex.ZERO;
     private double previousResidual = Double.POSITIVE_INFINITY;
     private double baselineResidual = Double.POSITIVE_INFINITY;
     private String status = "Ready";
     private boolean fixedTarget;
+    private boolean directErrorLearning;
+    private boolean blindProbesAllowed = true;
     private String label = "Dominant";
     private double currentImprovementDb = Double.NaN;
     private int rejectedAdaptations;
@@ -47,6 +77,15 @@ public final class AutoController {
     private double seekDirection;
     private double seekBestFrequency;
     private double seekBestResidual;
+    private Complex auditCommand = Complex.ZERO;
+    private Complex auditOffResidual = Complex.ZERO;
+    private long lastAuditCompletedMs;
+    private boolean activeVerificationPassed;
+    private boolean activeVerificationFailed;
+    private double auditReducedScale;
+    private double auditRequiredReductionDb = ROOM_MIN_VERIFIED_REDUCTION_DB;
+    private double smoothedVirtualImprovementDb = Double.NaN;
+    private int virtualVerificationFailures;
 
     public synchronized void start(long nowMs, double maximumGain) {
         configure(nowMs, maximumGain, 34.5, false, "Dominant");
@@ -87,8 +126,10 @@ public final class AutoController {
                                                               boolean fixedByTelemetry,
                                                               Complex storedSecondaryPath) {
         configure(nowMs, maximumGain, frequencyHz, fixedByTelemetry, label);
-        if (storedSecondaryPath != null && storedSecondaryPath.magnitude() >= 1.0e-5)
+        if (storedSecondaryPath != null && storedSecondaryPath.magnitude() >= 1.0e-5) {
             learnedSecondaryPath = storedSecondaryPath;
+            calibrationPath = storedSecondaryPath;
+        }
         stage = Stage.BASELINE;
         status = learnedSecondaryPath.magnitude() > 0
                 ? label + ": measuring baseline for learned path…" : label + ": measuring baseline…";
@@ -107,13 +148,27 @@ public final class AutoController {
         secondaryPath = Complex.ZERO;
         recipeCommand = Complex.ZERO;
         learnedSecondaryPath = Complex.ZERO;
+        calibrationPath = Complex.ZERO;
         usingLearnedSecondaryPath = false;
+        runtimeRefinedSecondaryPath = false;
+        calibratedRefinementAttempted = false;
+        refinementDitherCommand = Complex.ZERO;
+        refinementPositiveResidual = Complex.ZERO;
         positiveProbeCommand = Complex.ZERO;
         positiveProbeResidual = Complex.ZERO;
         previousResidual = Double.POSITIVE_INFINITY;
         baselineResidual = Double.POSITIVE_INFINITY;
         currentImprovementDb = Double.NaN;
         rejectedAdaptations = 0;
+        auditCommand = Complex.ZERO;
+        auditOffResidual = Complex.ZERO;
+        lastAuditCompletedMs = nowMs;
+        activeVerificationPassed = false;
+        activeVerificationFailed = false;
+        auditReducedScale = 0.0;
+        auditRequiredReductionDb = ROOM_MIN_VERIFIED_REDUCTION_DB;
+        smoothedVirtualImprovementDb = Double.NaN;
+        virtualVerificationFailures = 0;
     }
 
     public synchronized void stop() {
@@ -122,9 +177,51 @@ public final class AutoController {
         status = label + ": stopped";
     }
 
+    public synchronized void setDirectErrorLearning(boolean enabled) { directErrorLearning = enabled; }
+    public synchronized void setBlindProbesAllowed(boolean allowed) { blindProbesAllowed = allowed; }
+    private boolean mustRejectInsteadOfBlindProbe() { return directErrorLearning || !blindProbesAllowed; }
+
+    private long settleMs() { return directErrorLearning ? DIRECT_ERROR_SETTLE_MS : SETTLE_MS; }
+    private long adaptIntervalMs() { return directErrorLearning ? 220L : ADAPT_INTERVAL_MS; }
+
+    private Complex initialVerificationCommand() {
+        if (secondaryPath.magnitude() < 1.0e-9) return Complex.ZERO;
+        Complex optimum = baseline.negate().divide(secondaryPath).clampMagnitude(maximumGain);
+        double cap = Math.min(maximumGain, INITIAL_VERIFICATION_MAX_GAIN);
+        return optimum.multiply(INITIAL_VERIFICATION_SCALE).clampMagnitude(cap);
+    }
+
     public synchronized void setMaximumGain(double maximumGain) {
         this.maximumGain = clamp(maximumGain, 0.0001, 0.15);
         command = command.clampMagnitude(this.maximumGain);
+    }
+
+    /**
+     * Refresh the route-calibrated complex path at the controller's current frequency.  If runtime
+     * micro-refinement has measured a correction to the calibration, preserve that correction while
+     * using the calibration's frequency-to-frequency ratio to follow a moving vehicle/order tone.
+     */
+    public synchronized void refreshSecondaryPath(Complex refreshedPath) {
+        if (refreshedPath == null || refreshedPath.magnitude() < 1.0e-5) return;
+        Complex priorCalibration = calibrationPath;
+        calibrationPath = refreshedPath;
+        Complex effectiveRefresh = refreshedPath;
+        if (runtimeRefinedSecondaryPath && secondaryPath.magnitude() >= 1.0e-5
+                && priorCalibration.magnitude() >= 1.0e-5) {
+            effectiveRefresh = secondaryPath.multiply(refreshedPath.divide(priorCalibration));
+        }
+        if (secondaryPath.magnitude() >= 1.0e-5) {
+            if (command.magnitude() > 0 && (stage == Stage.VERIFY_HALF || stage == Stage.VERIFY_FULL
+                    || stage == Stage.REFINE_POSITIVE || stage == Stage.REFINE_NEGATIVE
+                    || stage == Stage.RUNNING || stage == Stage.VERIFY_FINE || stage == Stage.FOLLOW_VERIFY
+                    || stage == Stage.AUDIT_OFF || stage == Stage.AUDIT_ON)) {
+                Complex predictedSpeakerContribution = secondaryPath.multiply(command);
+                command = predictedSpeakerContribution.divide(effectiveRefresh).clampMagnitude(maximumGain);
+            }
+            secondaryPath = effectiveRefresh;
+        } else if (stage == Stage.BASELINE || learnedSecondaryPath.magnitude() >= 1.0e-5) {
+            learnedSecondaryPath = effectiveRefresh;
+        }
     }
 
     /**
@@ -189,12 +286,16 @@ public final class AutoController {
             case PROBE_NEGATIVE -> updateNegativeProbe(snapshot, nowMs);
             case VERIFY_HALF -> updateHalf(snapshot, nowMs);
             case VERIFY_FULL -> updateFull(snapshot, nowMs);
+            case REFINE_POSITIVE -> updateRefinePositive(snapshot, nowMs);
+            case REFINE_NEGATIVE -> updateRefineNegative(snapshot, nowMs);
             case RUNNING -> updateRunning(snapshot, nowMs);
             case VERIFY_FINE -> updateFine(snapshot, nowMs);
             case SEEK_FIRST -> updateSeekFirst(snapshot, nowMs);
             case SEEK_SECOND -> updateSeekSecond(snapshot, nowMs);
             case SEEK_RETURN -> updateSeekReturn(snapshot, nowMs);
             case FOLLOW_VERIFY -> updateFollow(snapshot, nowMs);
+            case AUDIT_OFF -> updateAuditOff(snapshot, nowMs);
+            case AUDIT_ON -> updateAuditOn(snapshot, nowMs);
         }
         return output();
     }
@@ -215,7 +316,7 @@ public final class AutoController {
 
     private void updateBaseline(SpectrumSnapshot snapshot, long nowMs) {
         command = Complex.ZERO;
-        if (elapsed(nowMs) < SETTLE_MS || !targetMatches(snapshot)) return;
+        if (elapsed(nowMs) < settleMs() || !targetMatches(snapshot)) return;
         baseline = snapshot.targetComplex();
         baselineResidual = baseline.magnitude();
         if (learnedSecondaryPath.magnitude() >= 1.0e-5) {
@@ -224,6 +325,15 @@ public final class AutoController {
             usingLearnedSecondaryPath = true;
             previousCommand = Complex.ZERO;
             previousResidual = baselineResidual;
+            // A short route-calibration FIR can have the wrong low-frequency phase.  For any
+            // calibrated/no-blind-probe lane, never use that seed for a large first command.
+            // Instead identify the local complex path with the bounded symmetric micro-pulse first.
+            if (mustRejectInsteadOfBlindProbe() && calibrationPath.magnitude() >= 1.0e-5) {
+                command = Complex.ZERO;
+                if (beginCalibratedRefinement(nowMs, "measuring local narrowband path before cancellation")) return;
+                rejectActiveVerification("could not start local calibrated-path measurement");
+                return;
+            }
             command = baseline.negate().divide(secondaryPath)
                     .clampMagnitude(maximumGain).multiply(0.5);
             stage = Stage.VERIFY_HALF;
@@ -242,6 +352,10 @@ public final class AutoController {
     }
 
     private void beginProbe(long nowMs) {
+        if (mustRejectInsteadOfBlindProbe()) {
+            rejectActiveVerification("no trustworthy calibrated secondary path; lane quarantined");
+            return;
+        }
         double probeGain = Math.min(maximumGain, Math.max(0.0002, maximumGain * 0.5));
         command = Complex.polar(probeGain, 0.0);
         stage = Stage.PROBE_POSITIVE;
@@ -250,7 +364,7 @@ public final class AutoController {
     }
 
     private void updateRecipe(SpectrumSnapshot snapshot, long nowMs) {
-        if (elapsed(nowMs) < SETTLE_MS || !targetMatches(snapshot)) return;
+        if (elapsed(nowMs) < settleMs() || !targetMatches(snapshot)) return;
         double residual = snapshot.targetComplex().magnitude();
         Complex delta = snapshot.targetComplex().subtract(baseline);
         if (residual > baselineResidual * 1.05 || delta.magnitude() < Math.max(1.0e-5, baselineResidual * 0.02)) {
@@ -275,7 +389,7 @@ public final class AutoController {
     }
 
     private void updatePositiveProbe(SpectrumSnapshot snapshot, long nowMs) {
-        if (elapsed(nowMs) < SETTLE_MS || !targetMatches(snapshot)) return;
+        if (elapsed(nowMs) < settleMs() || !targetMatches(snapshot)) return;
         positiveProbeCommand = command;
         positiveProbeResidual = snapshot.targetComplex();
         command = command.negate();
@@ -285,7 +399,7 @@ public final class AutoController {
     }
 
     private void updateNegativeProbe(SpectrumSnapshot snapshot, long nowMs) {
-        if (elapsed(nowMs) < SETTLE_MS || !targetMatches(snapshot)) return;
+        if (elapsed(nowMs) < settleMs() || !targetMatches(snapshot)) return;
         Complex negativeProbeResidual = snapshot.targetComplex();
         Complex difference = positiveProbeResidual.subtract(negativeProbeResidual);
         secondaryPath = difference.divide(positiveProbeCommand.multiply(2.0));
@@ -307,11 +421,16 @@ public final class AutoController {
     }
 
     private void updateHalf(SpectrumSnapshot snapshot, long nowMs) {
-        if (elapsed(nowMs) < SETTLE_MS || !targetMatches(snapshot)) return;
+        if (elapsed(nowMs) < settleMs() || !targetMatches(snapshot)) return;
         double residual = snapshot.targetComplex().magnitude();
         if (residual > baselineResidual * 1.03) {
             if (usingLearnedSecondaryPath) {
                 usingLearnedSecondaryPath = false;
+                if (mustRejectInsteadOfBlindProbe()) {
+                    if (beginCalibratedRefinement(nowMs, "calibrated seed increased error")) return;
+                    rejectActiveVerification("calibrated path increased the measured error");
+                    return;
+                }
                 command = Complex.ZERO;
                 beginProbe(nowMs);
                 return;
@@ -319,24 +438,44 @@ public final class AutoController {
             reject("trial became louder");
             return;
         }
+        if (mustRejectInsteadOfBlindProbe()) {
+            double requiredInitialRatio = Math.pow(10.0, -INITIAL_VERIFICATION_MIN_REDUCTION_DB / 20.0);
+            if (residual >= baselineResidual * requiredInitialRatio) {
+                if (usingLearnedSecondaryPath) {
+                    usingLearnedSecondaryPath = false;
+                    if (beginCalibratedRefinement(nowMs, "bounded initial trial lacked measurable benefit")) return;
+                    rejectActiveVerification("locally measured path did not reduce the tone at bounded initial strength");
+                    return;
+                }
+                reject("bounded initial trial did not reduce the tone");
+                return;
+            }
+        }
         previousCommand = command;
         previousResidual = residual;
         command = baseline.negate().divide(secondaryPath).clampMagnitude(maximumGain);
         stage = Stage.VERIFY_FULL;
         stageStartedMs = nowMs;
-        status = label + ": testing calculated level…";
+        status = label + ": bounded trial reduced the tone; testing calculated level…";
     }
 
     private void updateFull(SpectrumSnapshot snapshot, long nowMs) {
-        if (elapsed(nowMs) < SETTLE_MS || !targetMatches(snapshot)) return;
+        if (elapsed(nowMs) < settleMs() || !targetMatches(snapshot)) return;
         double residual = snapshot.targetComplex().magnitude();
         if (residual > previousResidual * 1.03) {
             command = previousCommand;
             residual = previousResidual;
         }
-        if (residual >= baselineResidual * 0.99) {
+        double requiredRatio = directErrorLearning
+                ? Math.pow(10.0, -ROOM_MIN_VERIFIED_REDUCTION_DB / 20.0) : 0.99;
+        if (residual >= baselineResidual * requiredRatio) {
             if (usingLearnedSecondaryPath) {
                 usingLearnedSecondaryPath = false;
+                if (mustRejectInsteadOfBlindProbe()) {
+                    if (beginCalibratedRefinement(nowMs, "calibrated seed lacked repeatable benefit")) return;
+                    rejectActiveVerification("calibrated path did not produce repeatable reduction");
+                    return;
+                }
                 command = Complex.ZERO;
                 beginProbe(nowMs);
                 return;
@@ -347,13 +486,98 @@ public final class AutoController {
         usingLearnedSecondaryPath = false;
         previousResidual = residual;
         previousCommand = command;
+        if (directErrorLearning) {
+            beginRoomAudit(nowMs, "certifying cancellation against a muted baseline…",
+                    0.0, ROOM_MIN_VERIFIED_REDUCTION_DB);
+            return;
+        }
         stage = Stage.RUNNING;
         stageStartedMs = nowMs;
         status = improvementStatus(residual);
     }
 
+    private boolean beginCalibratedRefinement(long nowMs, String reason) {
+        if (calibratedRefinementAttempted || calibrationPath.magnitude() < 1.0e-5
+                || !Double.isFinite(baselineResidual) || baselineResidual < 1.0e-7) return false;
+        calibratedRefinementAttempted = true;
+        double upper = Math.max(CALIBRATED_REFINE_MIN_GAIN,
+                Math.min(CALIBRATED_REFINE_MAX_GAIN, maximumGain * CALIBRATED_REFINE_MAX_LANE_FRACTION));
+        double predicted = baselineResidual * CALIBRATED_REFINE_TARGET_CONTRIBUTION
+                / Math.max(calibrationPath.magnitude(), 1.0e-5);
+        double ditherGain = clamp(predicted, CALIBRATED_REFINE_MIN_GAIN, upper);
+        Complex predictedCommand = baseline.negate().divide(calibrationPath);
+        double phase = predictedCommand.magnitude() >= 1.0e-9 ? predictedCommand.phaseRadians() : 0.0;
+        refinementDitherCommand = Complex.polar(ditherGain, phase);
+        refinementPositiveResidual = Complex.ZERO;
+        command = refinementDitherCommand;
+        stage = Stage.REFINE_POSITIVE;
+        stageStartedMs = nowMs;
+        status = String.format(Locale.US, "%s: %s; tiny calibrated-path refinement (+ %.4f)…",
+                label, reason, ditherGain);
+        return true;
+    }
+
+    private void updateRefinePositive(SpectrumSnapshot snapshot, long nowMs) {
+        if (elapsed(nowMs) < settleMs() || !targetMatches(snapshot)) return;
+        refinementPositiveResidual = snapshot.targetComplex();
+        // The perturbation is intentionally tiny; an unexpectedly huge response is a route/safety
+        // mismatch, not something to explore further.
+        if (refinementPositiveResidual.magnitude() > baselineResidual * 1.75) {
+            rejectActiveVerification("tiny path-refinement pulse produced an unsafe response");
+            return;
+        }
+        command = refinementDitherCommand.negate();
+        stage = Stage.REFINE_NEGATIVE;
+        stageStartedMs = nowMs;
+        status = label + ": tiny calibrated-path refinement (−)…";
+    }
+
+    private void updateRefineNegative(SpectrumSnapshot snapshot, long nowMs) {
+        if (elapsed(nowMs) < settleMs() || !targetMatches(snapshot)) return;
+        Complex negative = snapshot.targetComplex();
+        if (negative.magnitude() > baselineResidual * 1.75) {
+            rejectActiveVerification("tiny path-refinement pulse produced an unsafe response");
+            return;
+        }
+        Complex difference = refinementPositiveResidual.subtract(negative);
+        double measurable = Math.max(1.0e-6, baselineResidual * CALIBRATED_REFINE_MIN_DELTA_RATIO);
+        if (difference.magnitude() < measurable || refinementDitherCommand.magnitude() < 1.0e-9) {
+            rejectActiveVerification("local calibrated-path refinement was not measurable");
+            return;
+        }
+        Complex measuredPath = difference.divide(refinementDitherCommand.multiply(2.0));
+        double calibrationMagnitude = Math.max(calibrationPath.magnitude(), 1.0e-9);
+        double pathRatio = measuredPath.magnitude() / calibrationMagnitude;
+        if (measuredPath.magnitude() < 1.0e-5 || !Double.isFinite(pathRatio)
+                || pathRatio < 1.0 / CALIBRATED_REFINE_MAX_PATH_RATIO
+                || pathRatio > CALIBRATED_REFINE_MAX_PATH_RATIO) {
+            rejectActiveVerification("local path-refinement estimate was implausible");
+            return;
+        }
+        baseline = refinementPositiveResidual.add(negative).multiply(0.5);
+        baselineResidual = baseline.magnitude();
+        secondaryPath = measuredPath;
+        runtimeRefinedSecondaryPath = true;
+        previousCommand = Complex.ZERO;
+        previousResidual = baselineResidual;
+        command = initialVerificationCommand();
+        usingLearnedSecondaryPath = true;
+        stage = Stage.VERIFY_HALF;
+        stageStartedMs = nowMs;
+        status = String.format(Locale.US, "%s: local path refined (%.1f× calibration); verifying bounded initial strength…",
+                label, pathRatio);
+    }
+
     private void updateRunning(SpectrumSnapshot snapshot, long nowMs) {
-        if (!fixedTarget && elapsed(nowMs) >= SETTLE_MS) {
+        if (directErrorLearning && activeVerificationPassed) {
+            if (updateRoomVirtualVerification(snapshot, nowMs)) return;
+            if (nowMs - lastAuditCompletedMs >= roomAuditIntervalMs()) {
+                beginRoomAudit(nowMs, "gently re-checking full versus reduced ANC…",
+                        ROOM_SOFT_AUDIT_SCALE, ROOM_SOFT_AUDIT_MIN_DELTA_DB);
+                return;
+            }
+        }
+        if (!fixedTarget && elapsed(nowMs) >= settleMs()) {
             double drift = snapshot.peakFrequencyHz() - frequencyHz;
             if (Math.abs(drift) >= 0.06 && Math.abs(drift) <= 0.60) {
                 seekCentreFrequency = frequencyHz;
@@ -375,16 +599,19 @@ public final class AutoController {
             status = improvementStatus(previousResidual);
             return;
         }
-        if (elapsed(nowMs) >= ADAPT_INTERVAL_MS && targetMatches(snapshot)) {
+        if (elapsed(nowMs) >= adaptIntervalMs() && targetMatches(snapshot)) {
             Complex error = snapshot.targetComplex();
             double residual = error.magnitude();
             double reference = Double.isFinite(previousResidual) ? previousResidual : baselineResidual;
             double innovation = Math.abs(residual - reference) / Math.max(reference, baselineResidual * 0.05);
             double agileWeight = clamp(innovation * 1.5, 0.0, 1.0);
-            double stepSize = 0.06 * (1.0 - agileWeight) + 0.20 * agileWeight;
+            double stepSize = directErrorLearning
+                    ? 0.07 * (1.0 - agileWeight) + 0.16 * agileWeight
+                    : 0.06 * (1.0 - agileWeight) + 0.20 * agileWeight;
             double normalization = secondaryPath.magnitudeSquared() + 1.0e-10;
+            double correctionLimit = maximumGain * (directErrorLearning ? 0.12 : 0.18);
             Complex gradient = secondaryPath.conjugate().multiply(error)
-                    .multiply(-stepSize / normalization).clampMagnitude(maximumGain * 0.18);
+                    .multiply(-stepSize / normalization).clampMagnitude(correctionLimit);
             previousCommand = command;
             previousResidual = residual;
             command = command.multiply(0.9995).add(gradient).clampMagnitude(maximumGain);
@@ -395,7 +622,7 @@ public final class AutoController {
     }
 
     private void updateFine(SpectrumSnapshot snapshot, long nowMs) {
-        if (elapsed(nowMs) < SETTLE_MS || !targetMatches(snapshot)) return;
+        if (elapsed(nowMs) < settleMs() || !targetMatches(snapshot)) return;
         Complex measuredCommand = command;
         double residual = snapshot.targetComplex().magnitude();
         if (residual > Math.min(baselineResidual * 1.02, previousResidual * 1.25)) {
@@ -431,7 +658,7 @@ public final class AutoController {
     }
 
     private void updateSeekFirst(SpectrumSnapshot snapshot, long nowMs) {
-        if (elapsed(nowMs) < SETTLE_MS || !targetMatches(snapshot)) return;
+        if (elapsed(nowMs) < settleMs() || !targetMatches(snapshot)) return;
         double residual = snapshot.targetComplex().magnitude();
         if (residual < seekBestResidual) { seekBestResidual = residual; seekBestFrequency = frequencyHz; }
         frequencyHz = seekCentreFrequency - seekDirection * SEEK_STEP_HZ;
@@ -441,7 +668,7 @@ public final class AutoController {
     }
 
     private void updateSeekSecond(SpectrumSnapshot snapshot, long nowMs) {
-        if (elapsed(nowMs) < SETTLE_MS || !targetMatches(snapshot)) return;
+        if (elapsed(nowMs) < settleMs() || !targetMatches(snapshot)) return;
         double residual = snapshot.targetComplex().magnitude();
         if (residual < seekBestResidual) { seekBestResidual = residual; seekBestFrequency = frequencyHz; }
         frequencyHz = seekBestFrequency;
@@ -451,7 +678,7 @@ public final class AutoController {
     }
 
     private void updateSeekReturn(SpectrumSnapshot snapshot, long nowMs) {
-        if (elapsed(nowMs) < SETTLE_MS || !targetMatches(snapshot)) return;
+        if (elapsed(nowMs) < settleMs() || !targetMatches(snapshot)) return;
         previousResidual = snapshot.targetComplex().magnitude();
         stage = Stage.RUNNING;
         stageStartedMs = nowMs;
@@ -459,11 +686,113 @@ public final class AutoController {
     }
 
     private void updateFollow(SpectrumSnapshot snapshot, long nowMs) {
-        if (elapsed(nowMs) < SETTLE_MS || !targetMatches(snapshot)) return;
+        if (elapsed(nowMs) < settleMs() || !targetMatches(snapshot)) return;
         previousResidual = snapshot.targetComplex().magnitude();
         stage = Stage.RUNNING;
         stageStartedMs = nowMs;
         status = String.format(Locale.US, "%s: tracking %.2f Hz", label, frequencyHz);
+    }
+
+    private boolean updateRoomVirtualVerification(SpectrumSnapshot snapshot, long nowMs) {
+        if (!targetMatches(snapshot) || secondaryPath.magnitude() < 1.0e-5
+                || command.magnitude() < 1.0e-7) return false;
+        double virtualImprovement = estimatedFullImprovementDb(snapshot.targetComplex());
+        if (!Double.isFinite(virtualImprovement)) return false;
+        smoothedVirtualImprovementDb = Double.isFinite(smoothedVirtualImprovementDb)
+                ? smoothedVirtualImprovementDb * (1.0 - ROOM_VIRTUAL_VERIFY_SMOOTHING)
+                    + virtualImprovement * ROOM_VIRTUAL_VERIFY_SMOOTHING
+                : virtualImprovement;
+        currentImprovementDb = smoothedVirtualImprovementDb;
+        if (smoothedVirtualImprovementDb >= ROOM_VIRTUAL_VERIFY_MIN_DB) {
+            virtualVerificationFailures = Math.max(0, virtualVerificationFailures - 2);
+            return false;
+        }
+        if (++virtualVerificationFailures < ROOM_VIRTUAL_VERIFY_FAILURE_WINDOWS) return false;
+        virtualVerificationFailures = 0;
+        beginRoomAudit(nowMs, "predicted benefit weakened; checking at reduced strength…",
+                ROOM_SOFT_AUDIT_SCALE, ROOM_SOFT_AUDIT_MIN_DELTA_DB);
+        return true;
+    }
+
+    private double estimatedFullImprovementDb(Complex residual) {
+        Complex estimatedOff = residual.subtract(secondaryPath.multiply(command));
+        return 20.0 * Math.log10(Math.max(estimatedOff.magnitude(), 1.0e-9)
+                / Math.max(residual.magnitude(), 1.0e-9));
+    }
+
+    private void beginRoomAudit(long nowMs, String message,
+                                double reducedScale, double requiredReductionDb) {
+        auditCommand = command;
+        auditReducedScale = clamp(reducedScale, 0.0, 0.95);
+        auditRequiredReductionDb = Math.max(0.05, requiredReductionDb);
+        command = auditCommand.multiply(auditReducedScale);
+        auditOffResidual = Complex.ZERO;
+        stage = Stage.AUDIT_OFF;
+        stageStartedMs = nowMs;
+        status = label + ": " + message;
+    }
+
+    private void updateAuditOff(SpectrumSnapshot snapshot, long nowMs) {
+        command = auditCommand.multiply(auditReducedScale);
+        if (elapsed(nowMs) < settleMs() || !targetMatches(snapshot)) return;
+        auditOffResidual = snapshot.targetComplex();
+        baseline = auditOffResidual;
+        baselineResidual = auditOffResidual.magnitude();
+        if (!Double.isFinite(baselineResidual) || baselineResidual < 1.0e-7
+                || auditCommand.magnitude() < 1.0e-7) {
+            rejectActiveVerification("muted baseline was not measurable");
+            return;
+        }
+        command = auditCommand.clampMagnitude(maximumGain);
+        stage = Stage.AUDIT_ON;
+        stageStartedMs = nowMs;
+        status = label + ": restoring ANC for measured A/B verification…";
+    }
+
+    private void updateAuditOn(SpectrumSnapshot snapshot, long nowMs) {
+        if (elapsed(nowMs) < settleMs() || !targetMatches(snapshot)) return;
+        double onResidual = snapshot.targetComplex().magnitude();
+        double measuredDelta = 20.0 * Math.log10(Math.max(baselineResidual, 1.0e-9)
+                / Math.max(onResidual, 1.0e-9));
+        if (!Double.isFinite(measuredDelta) || measuredDelta < auditRequiredReductionDb) {
+            rejectActiveVerification(String.format(Locale.US,
+                    "%s A/B check found only %.1f dB benefit",
+                    auditReducedScale <= 0.01 ? "muted" : "reduced-strength", measuredDelta));
+            return;
+        }
+        double virtualImprovement = estimatedFullImprovementDb(snapshot.targetComplex());
+        activeVerificationPassed = true;
+        activeVerificationFailed = false;
+        previousCommand = command;
+        previousResidual = onResidual;
+        currentImprovementDb = Double.isFinite(virtualImprovement)
+                ? Math.max(measuredDelta, virtualImprovement) : measuredDelta;
+        smoothedVirtualImprovementDb = currentImprovementDb;
+        virtualVerificationFailures = 0;
+        lastAuditCompletedMs = nowMs;
+        stage = Stage.RUNNING;
+        stageStartedMs = nowMs;
+        status = String.format(Locale.US,
+                "%s %.2f Hz · %.1f dB verified %s benefit",
+                label, frequencyHz, measuredDelta,
+                auditReducedScale <= 0.01 ? "on/off" : "full/reduced");
+    }
+
+    private void rejectActiveVerification(String reason) {
+        command = Complex.ZERO;
+        auditCommand = Complex.ZERO;
+        activeVerificationPassed = false;
+        activeVerificationFailed = true;
+        currentImprovementDb = Double.NaN;
+        smoothedVirtualImprovementDb = Double.NaN;
+        virtualVerificationFailures = 0;
+        stage = Stage.IDLE;
+        status = label + ": " + reason + "; muted and quarantined";
+    }
+
+    private long roomAuditIntervalMs() {
+        long spread = Math.floorMod(Math.round(frequencyHz * 37.0), ROOM_AUDIT_SPREAD_MS);
+        return ROOM_AUDIT_BASE_INTERVAL_MS + spread;
     }
 
     private void reject(String reason) {
@@ -481,6 +810,8 @@ public final class AutoController {
     public synchronized double currentImprovementDb() { return currentImprovementDb; }
     public synchronized Complex secondaryPathEstimate() { return secondaryPath; }
     public synchronized boolean hasUsableSecondaryPathEstimate() { return secondaryPath.magnitude() >= 1.0e-5; }
+    public synchronized boolean hasPassedActiveVerification() { return activeVerificationPassed; }
+    public synchronized boolean activeVerificationFailed() { return activeVerificationFailed; }
     private boolean targetMatches(SpectrumSnapshot snapshot) { return Math.abs(snapshot.targetFrequencyHz() - frequencyHz) < 0.035; }
     private long elapsed(long nowMs) { return nowMs - stageStartedMs; }
 

@@ -18,6 +18,12 @@ public final class BroadbandDetector {
     private final List<Track> tracks = new ArrayList<>();
 
     public synchronized List<Candidate> update(List<SpectrumAnalyzer.DetectedTone> detections, long nowMs) {
+        return update(detections,nowMs,MATCH_RADIUS_HZ);
+    }
+
+    public synchronized List<Candidate> update(List<SpectrumAnalyzer.DetectedTone> detections, long nowMs,
+                                                double matchRadiusHz) {
+        matchRadiusHz=Math.max(MATCH_RADIUS_HZ,Math.min(6.0,matchRadiusHz));
         for (Track track : tracks) track.seenThisScan = false;
         for (SpectrumAnalyzer.DetectedTone detection : detections) {
             if (detection.dbFs() < ABSOLUTE_SANITY_FLOOR_DBFS || detection.prominenceDb()<MINIMUM_PROMINENCE_DB) continue;
@@ -25,7 +31,7 @@ public final class BroadbandDetector {
             double bestDistance = Double.POSITIVE_INFINITY;
             for (Track track : tracks) {
                 double distance = Math.abs(track.tracker.estimateHz() - detection.frequencyHz());
-                if (!track.seenThisScan && distance <= MATCH_RADIUS_HZ && distance < bestDistance) {
+                if (!track.seenThisScan && distance <= matchRadiusHz && distance < bestDistance) {
                     best = track; bestDistance = distance;
                 }
             }

@@ -1,0 +1,25 @@
+name: Apply ANC v0.6.12 fixed-tone suite
+on:
+  push:
+    branches: [ feature/room-anc-v062 ]
+    paths:
+      - '.github/workflows/apply-v0612-fixed-tone-suite.yml'
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feature/room-anc-v062
+          fetch-depth: 0
+      - name: Repair and apply v0.6.12
+        run: python3 tools/repair_and_apply_v0612_multitone_lab.py
+      - name: Commit changes
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add anclab
+          git commit -m 'Add v0.6.12 fixed-tone test suite' || exit 0
+          git push

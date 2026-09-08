@@ -104,6 +104,8 @@ public final class AncMediaService extends MediaBrowserService {
         audio.applyCalibration(calibration);audio.setAntiNoisePercent(store.loadAntiNoisePercent(profile));
         boolean ok=ProfileStore.PROFILE_HEADPHONES.equals(profile)
                 ?audio.startHeadphoneAnc()
+                :ProfileStore.PROFILE_ROOM.equals(profile)
+                ?audio.startRoomAnc(store.loadSpeculativeBroadband(profile))
                 :audio.startVehicleAnc(profile,store.loadSpeculativeBroadband(profile),store.loadMechanicalFrequencies(profile));
         if(!ok){showError(audio.getLastError());return;}
         acquireWakeLock();startOrUpdateForeground();updateSession();
@@ -203,7 +205,7 @@ public final class AncMediaService extends MediaBrowserService {
     private String profileLabel(){
         String p=runtime.audio.getActiveProfile();
         if(p==null||p.isEmpty())p=new ProfileStore(runtime.storage).loadCurrentProfile();
-        if(ProfileStore.PROFILE_P38.equals(p))return "P38";if(ProfileStore.PROFILE_E46.equals(p))return "E46";return "Headphones";
+        if(ProfileStore.PROFILE_P38.equals(p))return "P38";if(ProfileStore.PROFILE_E46.equals(p))return "E46";if(ProfileStore.PROFILE_ROOM.equals(p))return "Room";return "Headphones";
     }
     private static String oneLine(String s){int i=s.indexOf('\n');return i>=0?s.substring(0,i):s;}
 

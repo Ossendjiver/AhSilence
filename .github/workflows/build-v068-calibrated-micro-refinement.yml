@@ -1,27 +1,20 @@
-name: Build ANC Lab APK
-
+name: Build ANC Lab v0.6.8 calibrated micro-refinement
 on:
-  workflow_dispatch:
   push:
-    branches:
-      - feature/headphone-fxnlms-v05
-      - feature/p38-dryrun-v058
-      - feature/anc-lab-v059
-      - feature/multisensor-anc-v060
-      - feature/room-anc-v062
+    branches: [ feature/room-anc-v062 ]
     paths:
       - 'anclab/**'
-      - 'settings.gradle.kts'
-      - '.github/workflows/build-anclab.yml'
-
+      - '.github/workflows/build-v068-calibrated-micro-refinement.yml'
+  workflow_dispatch:
 permissions:
   contents: read
-
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: feature/room-anc-v062
       - uses: actions/setup-java@v5
         with:
           distribution: temurin
@@ -52,19 +45,14 @@ jobs:
               -validity 10000 \
               -dname "CN=ANC Lab Development,O=ANC Lab,C=AU"
           fi
-          echo "ANC Lab signing certificate:"
-          keytool -list -v \
-            -keystore "$HOME/.android/debug.keystore" \
-            -storepass android \
-            -alias androiddebugkey | grep -E "SHA256:|Owner:|Valid from:"
       - name: Make Gradle wrapper executable
         run: chmod +x gradlew
-      - name: Test and build ANC Lab debug APK
+      - name: Test and assemble
         run: ./gradlew :anclab:clean :anclab:testDebugUnitTest :anclab:assembleDebug --stacktrace
-      - name: Upload ANC Lab APK
+      - name: Upload debug APK
         uses: actions/upload-artifact@v4
         with:
-          name: ANC-Lab-v0.6.5-room-calibrated-path-dev-debug
+          name: ANC-Lab-v0.6.8-calibrated-micro-refinement-dev-debug
           path: anclab/build/outputs/apk/debug/anclab-debug.apk
           if-no-files-found: error
           retention-days: 14
