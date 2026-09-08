@@ -445,6 +445,7 @@ public final class VehicleNarrowbandBank {
     }
 
     private void startTelemetryController(Lane lane,long now){
+        lane.controller.setDirectErrorLearning(directFeedbackLearning);
         double source=telemetry==null?Double.NaN:telemetry.sourceValue(lane.model);
         VehicleCancellationRecipe recipe=recipeBook.find(routeKey,lane.model.id(),
                 lane.model.detectedNumberType(),source,lane.currentFrequencyHz);
@@ -455,6 +456,7 @@ public final class VehicleNarrowbandBank {
     }
 
     private void startDiscoveredController(DiscoveredLane lane,long now){
+        lane.controller.setDirectErrorLearning(directFeedbackLearning);
         VehicleCancellationRecipe recipe=recipeBook.find(routeKey,"discovered",
                 MechanicalFrequency.SourceType.FIXED,lane.anchorFrequencyHz,lane.currentFrequencyHz);
         if(recipe==null)lane.controller.startTracking(now,perLaneLimit(),lane.currentFrequencyHz,lane.label,false);

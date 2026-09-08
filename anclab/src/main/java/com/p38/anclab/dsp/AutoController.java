@@ -39,6 +39,7 @@ public final class AutoController {
     private double baselineResidual = Double.POSITIVE_INFINITY;
     private String status = "Ready";
     private boolean fixedTarget;
+    private boolean directErrorLearning;
     private String label = "Dominant";
     private double currentImprovementDb = Double.NaN;
     private int rejectedAdaptations;
@@ -121,6 +122,11 @@ public final class AutoController {
         command = Complex.ZERO;
         status = label + ": stopped";
     }
+
+    public synchronized void setDirectErrorLearning(boolean enabled) { directErrorLearning = enabled; }
+
+    private long settleMs() { return directErrorLearning ? 420L : SETTLE_MS; }
+    private long adaptIntervalMs() { return directErrorLearning ? 220L : ADAPT_INTERVAL_MS; }
 
     public synchronized void setMaximumGain(double maximumGain) {
         this.maximumGain = clamp(maximumGain, 0.0001, 0.15);
@@ -215,7 +221,7 @@ public final class AutoController {
 
     private void updateBaseline(SpectrumSnapshot snapshot, long nowMs) {
         command = Complex.ZERO;
-        if (elapsed(nowMs) < SETTLE_MS || !targetMatches(snapshot)) return;
+        if (elapsed(nowMs) < settleMs() || !targetMatches(snapshot)) return;
         baseline = snapshot.targetComplex();
         baselineResidual = baseline.magnitude();
         if (learnedSecondaryPath.magnitude() >= 1.0e-5) {
@@ -250,7 +256,7 @@ public final class AutoController {
     }
 
     private void updateRecipe(SpectrumSnapshot snapshot, long nowMs) {
-        if (elapsed(nowMs) < SETTLE_MS || !targetMatches(snapshot)) return;
+        if (elapsed(nowMs) < settleMs() || !targetMatches(snapshot)) return;
         double residual = snapshot.targetComplex().magnitude();
         Complex delta = snapshot.targetComplex().subtract(baseline);
         if (residual > baselineResidual * 1.05 || delta.magnitude() < Math.max(1.0e-5, baselineResidual * 0.02)) {
@@ -275,7 +281,7 @@ public final class AutoController {
     }
 
     private void updatePositiveProbe(SpectrumSnapshot snapshot, long nowMs) {
-        if (elapsed(nowMs) < SETTLE_MS || !targetMatches(snapshot)) return;
+        if (elapsed(nowMs) < settleMs() || !targetMatches(snapshot)) return;
         positiveProbeCommand = command;
         positiveProbeResidual = snapshot.targetComplex();
         command = command.negate();
@@ -285,7 +291,7 @@ public final class AutoController {
     }
 
     private void updateNegativeProbe(SpectrumSnapshot snapshot, long nowMs) {
-        if (elapsed(nowMs) < SETTLE_MS || !targetMatches(snapshot)) return;
+        if (elapsed(nowMs) < settleMs() || !targetMatches(snapshot)) return;
         Complex negativeProbeResidual = snapshot.targetComplex();
         Complex difference = positiveProbeResidual.subtract(negativeProbeResidual);
         secondaryPath = difference.divide(positiveProbeCommand.multiply(2.0));
@@ -307,7 +313,7 @@ public final class AutoController {
     }
 
     private void updateHalf(SpectrumSnapshot snapshot, long nowMs) {
-        if (elapsed(nowMs) < SETTLE_MS || !targetMatches(snapshot)) return;
+        if (elapsed(nowMs) < settleMs() || !targetMatches(snapshot)) return;
         double residual = snapshot.targetComplex().magnitude();
         if (residual > baselineResidual * 1.03) {
             if (usingLearnedSecondaryPath) {
@@ -328,7 +334,7 @@ public final class AutoController {
     }
 
     private void updateFull(SpectrumSnapshot snapshot, long nowMs) {
-        if (elapsed(nowMs) < SETTLE_MS || !targetMatches(snapshot)) return;
+        if (elapsed(nowMs) < settleMs() || !targetMatches(snapshot)) return;
         double residual = snapshot.targetComplex().magnitude();
         if (residual > previousResidual * 1.03) {
             command = previousCommand;
@@ -353,7 +359,7 @@ public final class AutoController {
     }
 
     private void updateRunning(SpectrumSnapshot snapshot, long nowMs) {
-        if (!fixedTarget && elapsed(nowMs) >= SETTLE_MS) {
+        if (!fixedTarget && elapsed(nowMs) >= settleMs()) {
             double drift = snapshot.peakFrequencyHz() - frequencyHz;
             if (Math.abs(drift) >= 0.06 && Math.abs(drift) <= 0.60) {
                 seekCentreFrequency = frequencyHz;
@@ -375,16 +381,19 @@ public final class AutoController {
             status = improvementStatus(previousResidual);
             return;
         }
-        if (elapsed(nowMs) >= ADAPT_INTERVAL_MS && targetMatches(snapshot)) {
+        if (elapsed(nowMs) >= adaptIntervalMs() && targetMatches(snapshot)) {
             Complex error = snapshot.targetComplex();
             double residual = error.magnitude();
             double reference = Double.isFinite(previousResidual) ? previousResidual : baselineResidual;
             double innovation = Math.abs(residual - reference) / Math.max(reference, baselineResidual * 0.05);
             double agileWeight = clamp(innovation * 1.5, 0.0, 1.0);
-            double stepSize = 0.06 * (1.0 - agileWeight) + 0.20 * agileWeight;
+            double stepSize = directErrorLearning
+                    ? 0.10 * (1.0 - agileWeight) + 0.28 * agileWeight
+                    : 0.06 * (1.0 - agileWeight) + 0.20 * agileWeight;
             double normalization = secondaryPath.magnitudeSquared() + 1.0e-10;
+            double correctionLimit = maximumGain * (directErrorLearning ? 0.24 : 0.18);
             Complex gradient = secondaryPath.conjugate().multiply(error)
-                    .multiply(-stepSize / normalization).clampMagnitude(maximumGain * 0.18);
+                    .multiply(-stepSize / normalization).clampMagnitude(correctionLimit);
             previousCommand = command;
             previousResidual = residual;
             command = command.multiply(0.9995).add(gradient).clampMagnitude(maximumGain);
@@ -395,7 +404,7 @@ public final class AutoController {
     }
 
     private void updateFine(SpectrumSnapshot snapshot, long nowMs) {
-        if (elapsed(nowMs) < SETTLE_MS || !targetMatches(snapshot)) return;
+        if (elapsed(nowMs) < settleMs() || !targetMatches(snapshot)) return;
         Complex measuredCommand = command;
         double residual = snapshot.targetComplex().magnitude();
         if (residual > Math.min(baselineResidual * 1.02, previousResidual * 1.25)) {
@@ -431,7 +440,7 @@ public final class AutoController {
     }
 
     private void updateSeekFirst(SpectrumSnapshot snapshot, long nowMs) {
-        if (elapsed(nowMs) < SETTLE_MS || !targetMatches(snapshot)) return;
+        if (elapsed(nowMs) < settleMs() || !targetMatches(snapshot)) return;
         double residual = snapshot.targetComplex().magnitude();
         if (residual < seekBestResidual) { seekBestResidual = residual; seekBestFrequency = frequencyHz; }
         frequencyHz = seekCentreFrequency - seekDirection * SEEK_STEP_HZ;
@@ -441,7 +450,7 @@ public final class AutoController {
     }
 
     private void updateSeekSecond(SpectrumSnapshot snapshot, long nowMs) {
-        if (elapsed(nowMs) < SETTLE_MS || !targetMatches(snapshot)) return;
+        if (elapsed(nowMs) < settleMs() || !targetMatches(snapshot)) return;
         double residual = snapshot.targetComplex().magnitude();
         if (residual < seekBestResidual) { seekBestResidual = residual; seekBestFrequency = frequencyHz; }
         frequencyHz = seekBestFrequency;
@@ -451,7 +460,7 @@ public final class AutoController {
     }
 
     private void updateSeekReturn(SpectrumSnapshot snapshot, long nowMs) {
-        if (elapsed(nowMs) < SETTLE_MS || !targetMatches(snapshot)) return;
+        if (elapsed(nowMs) < settleMs() || !targetMatches(snapshot)) return;
         previousResidual = snapshot.targetComplex().magnitude();
         stage = Stage.RUNNING;
         stageStartedMs = nowMs;
@@ -459,7 +468,7 @@ public final class AutoController {
     }
 
     private void updateFollow(SpectrumSnapshot snapshot, long nowMs) {
-        if (elapsed(nowMs) < SETTLE_MS || !targetMatches(snapshot)) return;
+        if (elapsed(nowMs) < settleMs() || !targetMatches(snapshot)) return;
         previousResidual = snapshot.targetComplex().magnitude();
         stage = Stage.RUNNING;
         stageStartedMs = nowMs;

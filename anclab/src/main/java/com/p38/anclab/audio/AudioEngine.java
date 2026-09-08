@@ -143,8 +143,8 @@ public final class AudioEngine {
         vehicleBroadbandEnabled=enabled;
         VehicleNarrowbandBank bank=vehicleNarrowband;if(bank!=null)bank.setBroadbandEnabled(enabled);
         if((mode!=Mode.VEHICLE&&mode!=Mode.ROOM)||!running.get())return;
-        if(!enabled){vehicleFx=null;safetyStatus="Speculative broadband OFF · telemetry narrowband lanes continue";}
-        else if(calibration!=null){vehicleFx=new FeedbackFxNlms(calibration.secondaryPath,calibration.delaySamples,128,calibration.safeOutputCeiling);configureVehicleFx(vehicleFx);if(bank!=null)vehicleFx.setExcludedFrequencies(bank.frequenciesHz());safetyStatus="Speculative broadband ON · live predictable lane bands excluded";}
+        if(!enabled){vehicleFx=null;safetyStatus=mode==Mode.ROOM?"Room broadband OFF · learned narrowband lanes continue":"Speculative broadband OFF · telemetry narrowband lanes continue";}
+        else if(calibration!=null){vehicleFx=new FeedbackFxNlms(calibration.secondaryPath,calibration.delaySamples,128,calibration.safeOutputCeiling);configureVehicleFx(vehicleFx);if(bank!=null)vehicleFx.setExcludedFrequencies(bank.frequenciesHz());safetyStatus=mode==Mode.ROOM?"Room broadband ON · direct residual adaptation active":"Speculative broadband ON · live predictable lane bands excluded";}
     }
 
     public GraphSnapshot getGraphSnapshot(){synchronized(graphLock){int n=graphCount;float[] r=new float[n],d=new float[n],c=new float[n],e=new float[n];int start=(graphWrite-n+GRAPH_POINTS)%GRAPH_POINTS;for(int i=0;i<n;i++){int p=(start+i)%GRAPH_POINTS;r[i]=graphReference[p];d[i]=graphDrive[p];c[i]=graphPredictedCancellation[p];e[i]=graphPredictedResidual[p];}return new GraphSnapshot(r,d,c,e,SAMPLE_RATE/(float)GRAPH_DECIMATION,running.get());}}
@@ -209,6 +209,7 @@ public final class AudioEngine {
             }else{
                 VehicleTelemetryRuntime telemetryForBank=null;
                 boolean room=requested==Mode.ROOM;
+                stationaryNoiseProfiler.reset();
                 if(!room){
                     if(vehicleTelemetry==null)throw new IllegalStateException("Vehicle telemetry runtime is unavailable");
                     vehicleTelemetry.activateProfile(profileId,mechanicalModels);telemetryForBank=vehicleTelemetry;
@@ -265,7 +266,7 @@ public final class AudioEngine {
                 if(vehicleFx!=null)checkSafetyTrips(vehicleFx.safetyTrips(),vehicleFx.safetyStatus());
                 updateVehicleBroadbandExclusions();
                 persistVehicleRecipesIfDue();
-                String nb=vehicleNarrowband==null?"":vehicleNarrowband.status();if((safetyStatus==null||safetyStatus.isEmpty()||safetyStatus.startsWith("Predictable narrowband"))&&!nb.isEmpty())safetyStatus=nb+(vehicleBroadbandEnabled?" · broadband ON":" · broadband OFF");
+                String nb=vehicleNarrowband==null?"":vehicleNarrowband.status();if((mode==Mode.ROOM||safetyStatus==null||safetyStatus.isEmpty()||safetyStatus.startsWith("Predictable narrowband"))&&!nb.isEmpty())safetyStatus=nb+(vehicleBroadbandEnabled?" · broadband ON":" · broadband OFF");
             }
             StationaryNoiseProfiler.Snapshot noise=stationaryNoiseProfiler.snapshot();String toneSummary=headphoneTones==null?"":headphoneTones.status();double confidence=headphoneFx==null?Double.NaN:headphoneFx.predictorConfidence();recorder.onAudio(in,out,n,new SessionRecorder.Diagnostics(noise.ancBandRmsDbFs(),confidence,toneSummary,noise.status(),safetyStatus));
             String algorithm=mode==Mode.HEADPHONES?"HEADPHONE_TONES_PLUS_PREDICTIVE_FXNLMS_15_600":mode==Mode.ROOM?(vehicleBroadbandEnabled?"ROOM_DIRECT_ERROR_NARROWBAND_PLUS_MEASURED_ERROR_BROADBAND":"ROOM_DIRECT_ERROR_NARROWBAND"):vehicleBroadbandEnabled?"VEHICLE_TELEMETRY_NARROWBAND_PLUS_MEASURED_ERROR_BROADBAND":"VEHICLE_TELEMETRY_NARROWBAND";
