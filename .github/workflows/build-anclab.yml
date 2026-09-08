@@ -64,7 +64,7 @@ jobs:
       - name: Upload ANC Lab APK
         uses: actions/upload-artifact@v4
         with:
-          name: ANC-Lab-v0.6.4-room-smoothed-dev-debug
+          name: ANC-Lab-v0.6.5-room-calibrated-path-dev-debug
           path: anclab/build/outputs/apk/debug/anclab-debug.apk
           if-no-files-found: error
           retention-days: 14
