@@ -8,6 +8,7 @@ on:
       - feature/p38-dryrun-v058
       - feature/anc-lab-v059
       - feature/multisensor-anc-v060
+      - feature/room-anc-v062
     paths:
       - 'anclab/**'
       - 'settings.gradle.kts'
@@ -63,7 +64,7 @@ jobs:
       - name: Upload ANC Lab APK
         uses: actions/upload-artifact@v4
         with:
-          name: ANC-Lab-v0.6-multisensor-dev-debug
+          name: ANC-Lab-v0.6.2-room-dev-debug
           path: anclab/build/outputs/apk/debug/anclab-debug.apk
           if-no-files-found: error
           retention-days: 14
