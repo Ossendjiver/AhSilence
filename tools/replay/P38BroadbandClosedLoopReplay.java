@@ -13,11 +13,12 @@ import java.util.Locale;
 /** Closed-loop synthetic-path replay for the experimental vehicle broadband controller. */
 public final class P38BroadbandClosedLoopReplay {
     private static final int SR = 48000;
-    private static final int DELAY = 2400; // 50 ms synthetic route used by the existing P38 replay suite.
+    private static final int DELAY = 2400;
     private static final float SAFE_CEILING = 0.08f;
     private static final double[] P38_EXCLUSIONS = {20.45, 34.42, 61.5};
+    private static final float[] SCALES = {1.0f, 0.50f, 0.25f, 0.10f};
 
-    private record Result(String section, String mode, double baselineRms, double residualRms,
+    private record Result(String section, String mode, float scale, double baselineRms, double residualRms,
                           double totalDeltaDb, double eligibleBaselineRms, double eligibleResidualRms,
                           double eligibleDeltaDb, double outputRms, double peakOutput,
                           double ceilingOccupancy, int safetyTrips, boolean latchedOff) { }
@@ -28,15 +29,15 @@ public final class P38BroadbandClosedLoopReplay {
         double end = Double.parseDouble(args[2]);
         float[] source = readSection(new File(args[0]), start, end);
         String section = String.format(Locale.US, "%.0f-%.0f", start, end);
-        Result integrated = run(section, "integrated-exclusions", source, P38_EXCLUSIONS);
-        Result broadbandOnly = run(section, "broadband-only", source, new double[0]);
-        print(integrated);
-        print(broadbandOnly);
+        for (float scale : SCALES) {
+            print(run(section, "integrated-exclusions", scale, source, P38_EXCLUSIONS));
+            print(run(section, "broadband-only", scale, source, new double[0]));
+        }
     }
 
-    private static Result run(String section, String mode, float[] source, double[] exclusions) {
+    private static Result run(String section, String mode, float scale, float[] source, double[] exclusions) {
         FeedbackFxNlms fx = new FeedbackFxNlms(new float[]{1f}, DELAY, 128, SAFE_CEILING);
-        fx.setUserOutputScale(1f); // production method internally caps broadband to 25% of allowance.
+        fx.setUserOutputScale(scale);
         fx.setRouteGainCompensation(1f);
         fx.setExcludedFrequencies(exclusions);
 
@@ -46,7 +47,6 @@ public final class P38BroadbandClosedLoopReplay {
         PredictableFrequencyExcluder baselineEligible = new PredictableFrequencyExcluder(SR, exclusions);
         PredictableFrequencyExcluder residualEligible = new PredictableFrequencyExcluder(SR, exclusions);
 
-        // Ignore the first quarter of each section so adaptation and all filter/delay states settle.
         int measureFrom = source.length / 4;
         double baseSq = 0, residualSq = 0, eligibleBaseSq = 0, eligibleResidualSq = 0, outSq = 0;
         long count = 0;
@@ -80,7 +80,7 @@ public final class P38BroadbandClosedLoopReplay {
         double eligibleBaseRms = Math.sqrt(eligibleBaseSq / Math.max(1, count));
         double eligibleResidualRms = Math.sqrt(eligibleResidualSq / Math.max(1, count));
         double outputRms = Math.sqrt(outSq / Math.max(1, count));
-        return new Result(section, mode, baseRms, residualRms, dbRatio(residualRms, baseRms),
+        return new Result(section, mode, scale, baseRms, residualRms, dbRatio(residualRms, baseRms),
                 eligibleBaseRms, eligibleResidualRms, dbRatio(eligibleResidualRms, eligibleBaseRms),
                 outputRms, peakOut, fx.ceilingOccupancy(), fx.safetyTrips(), fx.isLatchedOff());
     }
@@ -91,10 +91,10 @@ public final class P38BroadbandClosedLoopReplay {
 
     private static void print(Result r) {
         System.out.printf(Locale.US,
-                "BROADBAND section=%s mode=%s total_delta_db=%.3f eligible_delta_db=%.3f " +
+                "BROADBAND section=%s mode=%s scale=%.2f total_delta_db=%.3f eligible_delta_db=%.3f " +
                 "baseline_rms=%.6f residual_rms=%.6f eligible_baseline_rms=%.6f eligible_residual_rms=%.6f " +
                 "output_rms=%.6f peak_output=%.6f rail_occ=%.4f trips=%d latched=%s%n",
-                r.section, r.mode, r.totalDeltaDb, r.eligibleDeltaDb, r.baselineRms, r.residualRms,
+                r.section, r.mode, r.scale, r.totalDeltaDb, r.eligibleDeltaDb, r.baselineRms, r.residualRms,
                 r.eligibleBaselineRms, r.eligibleResidualRms, r.outputRms, r.peakOutput,
                 r.ceilingOccupancy, r.safetyTrips, r.latchedOff);
     }
