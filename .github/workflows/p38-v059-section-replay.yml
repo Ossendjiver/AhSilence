@@ -24,7 +24,7 @@ jobs:
         run: pip install numpy scipy gdown
       - name: Download real P38 WAV from Drive
         run: |
-          gdown --id 1NiNG6CORVcKrDd9YZGPVpkCqsQUewG6J -O P38.wav
+          gdown 1NiNG6CORVcKrDd9YZGPVpkCqsQUewG6J -O P38.wav
           ls -lh P38.wav
       - name: Run section acquisition replays
         run: python tools/p38_v059_section_acquisition.py P38.wav --out p38-v059-section-results
