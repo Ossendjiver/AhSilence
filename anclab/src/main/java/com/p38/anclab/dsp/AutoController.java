@@ -10,7 +10,7 @@ public final class AutoController {
 
     private enum Stage {
         IDLE, LISTENING, BASELINE, VERIFY_RECIPE, PROBE_POSITIVE, PROBE_NEGATIVE,
-        VERIFY_HALF, VERIFY_FULL, RUNNING, VERIFY_FINE, SEEK_FIRST, SEEK_SECOND,
+        VERIFY_HALF, VERIFY_FULL, REFINE_POSITIVE, REFINE_NEGATIVE, RUNNING, VERIFY_FINE, SEEK_FIRST, SEEK_SECOND,
         SEEK_RETURN, FOLLOW_VERIFY, AUDIT_OFF, AUDIT_ON
     }
 
@@ -29,6 +29,15 @@ public final class AutoController {
     private static final double ROOM_VIRTUAL_VERIFY_MIN_DB = 0.45;
     private static final int ROOM_VIRTUAL_VERIFY_FAILURE_WINDOWS = 12;
     private static final double ROOM_VIRTUAL_VERIFY_SMOOTHING = 0.18;
+    // A calibrated seed is allowed one tiny local complex-path refinement.  The perturbation is
+    // deliberately far below the old 50%-of-lane blind probe and is only attempted after a real
+    // route calibration exists.
+    private static final double CALIBRATED_REFINE_TARGET_CONTRIBUTION = 0.06;
+    private static final double CALIBRATED_REFINE_MIN_GAIN = 0.00015;
+    private static final double CALIBRATED_REFINE_MAX_GAIN = 0.00150;
+    private static final double CALIBRATED_REFINE_MAX_LANE_FRACTION = 0.12;
+    private static final double CALIBRATED_REFINE_MIN_DELTA_RATIO = 0.025;
+    private static final double CALIBRATED_REFINE_MAX_PATH_RATIO = 32.0;
 
     private Stage stage = Stage.IDLE;
     private long stageStartedMs;
@@ -40,7 +49,12 @@ public final class AutoController {
     private Complex previousCommand = Complex.ZERO;
     private Complex recipeCommand = Complex.ZERO;
     private Complex learnedSecondaryPath = Complex.ZERO;
+    private Complex calibrationPath = Complex.ZERO;
     private boolean usingLearnedSecondaryPath;
+    private boolean runtimeRefinedSecondaryPath;
+    private boolean calibratedRefinementAttempted;
+    private Complex refinementDitherCommand = Complex.ZERO;
+    private Complex refinementPositiveResidual = Complex.ZERO;
     private Complex positiveProbeCommand = Complex.ZERO;
     private Complex positiveProbeResidual = Complex.ZERO;
     private double previousResidual = Double.POSITIVE_INFINITY;
@@ -106,8 +120,10 @@ public final class AutoController {
                                                               boolean fixedByTelemetry,
                                                               Complex storedSecondaryPath) {
         configure(nowMs, maximumGain, frequencyHz, fixedByTelemetry, label);
-        if (storedSecondaryPath != null && storedSecondaryPath.magnitude() >= 1.0e-5)
+        if (storedSecondaryPath != null && storedSecondaryPath.magnitude() >= 1.0e-5) {
             learnedSecondaryPath = storedSecondaryPath;
+            calibrationPath = storedSecondaryPath;
+        }
         stage = Stage.BASELINE;
         status = learnedSecondaryPath.magnitude() > 0
                 ? label + ": measuring baseline for learned path…" : label + ": measuring baseline…";
@@ -126,7 +142,12 @@ public final class AutoController {
         secondaryPath = Complex.ZERO;
         recipeCommand = Complex.ZERO;
         learnedSecondaryPath = Complex.ZERO;
+        calibrationPath = Complex.ZERO;
         usingLearnedSecondaryPath = false;
+        runtimeRefinedSecondaryPath = false;
+        calibratedRefinementAttempted = false;
+        refinementDitherCommand = Complex.ZERO;
+        refinementPositiveResidual = Complex.ZERO;
         positiveProbeCommand = Complex.ZERO;
         positiveProbeResidual = Complex.ZERO;
         previousResidual = Double.POSITIVE_INFINITY;
@@ -162,19 +183,31 @@ public final class AutoController {
         command = command.clampMagnitude(this.maximumGain);
     }
 
-    /** Refresh the route-calibrated complex path at the controller's current frequency. */
+    /**
+     * Refresh the route-calibrated complex path at the controller's current frequency.  If runtime
+     * micro-refinement has measured a correction to the calibration, preserve that correction while
+     * using the calibration's frequency-to-frequency ratio to follow a moving vehicle/order tone.
+     */
     public synchronized void refreshSecondaryPath(Complex refreshedPath) {
-        if (!directErrorLearning || refreshedPath == null || refreshedPath.magnitude() < 1.0e-5) return;
+        if (refreshedPath == null || refreshedPath.magnitude() < 1.0e-5) return;
+        Complex priorCalibration = calibrationPath;
+        calibrationPath = refreshedPath;
+        Complex effectiveRefresh = refreshedPath;
+        if (runtimeRefinedSecondaryPath && secondaryPath.magnitude() >= 1.0e-5
+                && priorCalibration.magnitude() >= 1.0e-5) {
+            effectiveRefresh = secondaryPath.multiply(refreshedPath.divide(priorCalibration));
+        }
         if (secondaryPath.magnitude() >= 1.0e-5) {
             if (command.magnitude() > 0 && (stage == Stage.VERIFY_HALF || stage == Stage.VERIFY_FULL
+                    || stage == Stage.REFINE_POSITIVE || stage == Stage.REFINE_NEGATIVE
                     || stage == Stage.RUNNING || stage == Stage.VERIFY_FINE || stage == Stage.FOLLOW_VERIFY
                     || stage == Stage.AUDIT_OFF || stage == Stage.AUDIT_ON)) {
                 Complex predictedSpeakerContribution = secondaryPath.multiply(command);
-                command = predictedSpeakerContribution.divide(refreshedPath).clampMagnitude(maximumGain);
+                command = predictedSpeakerContribution.divide(effectiveRefresh).clampMagnitude(maximumGain);
             }
-            secondaryPath = refreshedPath;
+            secondaryPath = effectiveRefresh;
         } else if (stage == Stage.BASELINE || learnedSecondaryPath.magnitude() >= 1.0e-5) {
-            learnedSecondaryPath = refreshedPath;
+            learnedSecondaryPath = effectiveRefresh;
         }
     }
 
@@ -240,6 +273,8 @@ public final class AutoController {
             case PROBE_NEGATIVE -> updateNegativeProbe(snapshot, nowMs);
             case VERIFY_HALF -> updateHalf(snapshot, nowMs);
             case VERIFY_FULL -> updateFull(snapshot, nowMs);
+            case REFINE_POSITIVE -> updateRefinePositive(snapshot, nowMs);
+            case REFINE_NEGATIVE -> updateRefineNegative(snapshot, nowMs);
             case RUNNING -> updateRunning(snapshot, nowMs);
             case VERIFY_FINE -> updateFine(snapshot, nowMs);
             case SEEK_FIRST -> updateSeekFirst(snapshot, nowMs);
@@ -370,6 +405,7 @@ public final class AutoController {
             if (usingLearnedSecondaryPath) {
                 usingLearnedSecondaryPath = false;
                 if (mustRejectInsteadOfBlindProbe()) {
+                    if (beginCalibratedRefinement(nowMs, "calibrated seed increased error")) return;
                     rejectActiveVerification("calibrated path increased the measured error");
                     return;
                 }
@@ -401,6 +437,7 @@ public final class AutoController {
             if (usingLearnedSecondaryPath) {
                 usingLearnedSecondaryPath = false;
                 if (mustRejectInsteadOfBlindProbe()) {
+                    if (beginCalibratedRefinement(nowMs, "calibrated seed lacked repeatable benefit")) return;
                     rejectActiveVerification("calibrated path did not produce repeatable reduction");
                     return;
                 }
@@ -422,6 +459,78 @@ public final class AutoController {
         stage = Stage.RUNNING;
         stageStartedMs = nowMs;
         status = improvementStatus(residual);
+    }
+
+    private boolean beginCalibratedRefinement(long nowMs, String reason) {
+        if (calibratedRefinementAttempted || calibrationPath.magnitude() < 1.0e-5
+                || !Double.isFinite(baselineResidual) || baselineResidual < 1.0e-7) return false;
+        calibratedRefinementAttempted = true;
+        double upper = Math.max(CALIBRATED_REFINE_MIN_GAIN,
+                Math.min(CALIBRATED_REFINE_MAX_GAIN, maximumGain * CALIBRATED_REFINE_MAX_LANE_FRACTION));
+        double predicted = baselineResidual * CALIBRATED_REFINE_TARGET_CONTRIBUTION
+                / Math.max(calibrationPath.magnitude(), 1.0e-5);
+        double ditherGain = clamp(predicted, CALIBRATED_REFINE_MIN_GAIN, upper);
+        Complex predictedCommand = baseline.negate().divide(calibrationPath);
+        double phase = predictedCommand.magnitude() >= 1.0e-9 ? predictedCommand.phaseRadians() : 0.0;
+        refinementDitherCommand = Complex.polar(ditherGain, phase);
+        refinementPositiveResidual = Complex.ZERO;
+        command = refinementDitherCommand;
+        stage = Stage.REFINE_POSITIVE;
+        stageStartedMs = nowMs;
+        status = String.format(Locale.US, "%s: %s; tiny calibrated-path refinement (+ %.4f)…",
+                label, reason, ditherGain);
+        return true;
+    }
+
+    private void updateRefinePositive(SpectrumSnapshot snapshot, long nowMs) {
+        if (elapsed(nowMs) < settleMs() || !targetMatches(snapshot)) return;
+        refinementPositiveResidual = snapshot.targetComplex();
+        // The perturbation is intentionally tiny; an unexpectedly huge response is a route/safety
+        // mismatch, not something to explore further.
+        if (refinementPositiveResidual.magnitude() > baselineResidual * 1.75) {
+            rejectActiveVerification("tiny path-refinement pulse produced an unsafe response");
+            return;
+        }
+        command = refinementDitherCommand.negate();
+        stage = Stage.REFINE_NEGATIVE;
+        stageStartedMs = nowMs;
+        status = label + ": tiny calibrated-path refinement (−)…";
+    }
+
+    private void updateRefineNegative(SpectrumSnapshot snapshot, long nowMs) {
+        if (elapsed(nowMs) < settleMs() || !targetMatches(snapshot)) return;
+        Complex negative = snapshot.targetComplex();
+        if (negative.magnitude() > baselineResidual * 1.75) {
+            rejectActiveVerification("tiny path-refinement pulse produced an unsafe response");
+            return;
+        }
+        Complex difference = refinementPositiveResidual.subtract(negative);
+        double measurable = Math.max(1.0e-6, baselineResidual * CALIBRATED_REFINE_MIN_DELTA_RATIO);
+        if (difference.magnitude() < measurable || refinementDitherCommand.magnitude() < 1.0e-9) {
+            rejectActiveVerification("local calibrated-path refinement was not measurable");
+            return;
+        }
+        Complex measuredPath = difference.divide(refinementDitherCommand.multiply(2.0));
+        double calibrationMagnitude = Math.max(calibrationPath.magnitude(), 1.0e-9);
+        double pathRatio = measuredPath.magnitude() / calibrationMagnitude;
+        if (measuredPath.magnitude() < 1.0e-5 || !Double.isFinite(pathRatio)
+                || pathRatio < 1.0 / CALIBRATED_REFINE_MAX_PATH_RATIO
+                || pathRatio > CALIBRATED_REFINE_MAX_PATH_RATIO) {
+            rejectActiveVerification("local path-refinement estimate was implausible");
+            return;
+        }
+        baseline = refinementPositiveResidual.add(negative).multiply(0.5);
+        baselineResidual = baseline.magnitude();
+        secondaryPath = measuredPath;
+        runtimeRefinedSecondaryPath = true;
+        previousCommand = Complex.ZERO;
+        previousResidual = baselineResidual;
+        command = baseline.negate().divide(secondaryPath).clampMagnitude(maximumGain).multiply(0.5);
+        usingLearnedSecondaryPath = true;
+        stage = Stage.VERIFY_HALF;
+        stageStartedMs = nowMs;
+        status = String.format(Locale.US, "%s: local path refined (%.1f× calibration); verifying half strength…",
+                label, pathRatio);
     }
 
     private void updateRunning(SpectrumSnapshot snapshot, long nowMs) {

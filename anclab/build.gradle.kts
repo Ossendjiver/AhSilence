@@ -10,8 +10,8 @@ android {
         applicationId = "com.p38.anclab"
         minSdk = 26
         targetSdk = 35
-        versionCode = 25
-        versionName = "0.6.7-shared-calibrated-safety-dev"
+        versionCode = 26
+        versionName = "0.6.8-calibrated-micro-refinement-dev"
     }
 
     signingConfigs {
@@ -41,6 +41,6 @@ android {
 }
 
 dependencies {
-    // ANC v0.6.7 shares calibrated-path, no-blind-probe fallback safety across Room, P38 and E46 while retaining telemetry-specific vehicle tracking.
+    // ANC v0.6.8 adds one bounded calibration-gated micro-refinement when the stored low-frequency path misses, shared across Room, P38 and E46.
     testImplementation("junit:junit:4.13.2")
 }
