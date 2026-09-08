@@ -15,7 +15,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        section: ['600-780','1200-1380','1800-1980','2370-2550']
+        section: ['300-480','600-780','1500-1680','1800-1980']
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -65,7 +65,10 @@ jobs:
             anclab/src/main/java/com/p38/anclab/dsp/VehicleLaneRegistry.java \
             tools/replay/ReplayClock.java replay-src/com/p38/anclab/dsp/VehicleNarrowbandBank.java tools/replay/P38MultiSectionReplay.java
       - name: Replay ${{ matrix.section }}
-        run: java -cp replay-classes replay.P38MultiSectionReplay P38.wav results/${{ matrix.section }}.csv ${{ matrix.section }}
+        run: |
+          java -cp replay-classes replay.P38MultiSectionReplay P38.wav results/${{ matrix.section }}.csv ${{ matrix.section }}
+          echo '--- band summary CSV ---'
+          cat results/${{ matrix.section }}.csv
       - uses: actions/upload-artifact@v4
         with:
           name: P38-v0591-${{ matrix.section }}
