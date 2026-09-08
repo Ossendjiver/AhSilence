@@ -1,0 +1,27 @@
+name: Apply ANC v0.6.9 visible coexistent discovery patch
+on:
+  push:
+    branches: [ feature/room-anc-v062 ]
+    paths:
+      - 'tools/apply_v069_visible_discovery.py'
+      - '.github/workflows/apply-v069-visible-discovery.yml'
+permissions:
+  contents: write
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feature/room-anc-v062
+          fetch-depth: 0
+      - name: Apply v0.6.9 discovery patch
+        run: python3 tools/apply_v069_visible_discovery.py
+      - name: Commit v0.6.9 update
+        run: |
+          git config user.name 'Ossendjiver'
+          git config user.email '39517879+Ossendjiver@users.noreply.github.com'
+          git add anclab
+          git diff --cached --check
+          git commit -m 'Make persistent discovery visible and coexist with telemetry'
+          git push origin HEAD:feature/room-anc-v062
