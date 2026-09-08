@@ -1,0 +1,60 @@
+name: Build ANC Lab v0.6.7 shared safety
+
+on:
+  push:
+    branches: [ feature/room-anc-v062 ]
+    paths:
+      - '.github/workflows/build-v067-shared-safety.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feature/room-anc-v062
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: gradle
+      - uses: android-actions/setup-android@v3
+      - name: Install Android SDK
+        run: |
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager "platforms;android-36" "build-tools;35.0.0"
+      - name: Restore ANC Lab development signing directory
+        uses: actions/cache@v4
+        with:
+          path: ~/.android
+          key: anclab-debug-signing-v2
+      - name: Ensure stable ANC Lab debug signing key
+        shell: bash
+        run: |
+          mkdir -p "$HOME/.android"
+          if [ ! -f "$HOME/.android/debug.keystore" ]; then
+            keytool -genkeypair \
+              -keystore "$HOME/.android/debug.keystore" \
+              -storepass android \
+              -alias androiddebugkey \
+              -keypass android \
+              -keyalg RSA \
+              -keysize 2048 \
+              -validity 10000 \
+              -dname "CN=ANC Lab Development,O=ANC Lab,C=AU"
+          fi
+      - name: Make Gradle wrapper executable
+        run: chmod +x gradlew
+      - name: Test and build ANC Lab debug APK
+        run: ./gradlew :anclab:clean :anclab:testDebugUnitTest :anclab:assembleDebug --stacktrace
+      - name: Upload ANC Lab APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: ANC-Lab-v0.6.7-shared-calibrated-safety-dev-debug
+          path: anclab/build/outputs/apk/debug/anclab-debug.apk
+          if-no-files-found: error
+          retention-days: 14
