@@ -3,12 +3,7 @@ package com.p38.anclab.dsp;
 import java.util.Arrays;
 import java.util.List;
 
-/**
- * Shared stable-line discovery for profiles that do not have telemetry. It deliberately does not
- * own an output controller: callers can log/learn the discovered lines or hand them to a separate
- * narrowband layer. This lets headphone prediction benefit from the vehicle detector without
- * changing the existing headphone controller's authority.
- */
+/** Shared persistent-line discovery for profiles without telemetry. */
 public final class PredictableFrequencyDiscovery {
     private static final int INPUT_RATE=48000;
     private static final int DECIMATION=8;
@@ -21,10 +16,10 @@ public final class PredictableFrequencyDiscovery {
     private int write=0,count=0,decimator=0,sinceUpdate=0;
     private long inputSamplesSeen=0;
     private volatile double[] latest=new double[0];
+    private volatile List<BroadbandDetector.Candidate> latestCandidates=List.of();
 
     public PredictableFrequencyDiscovery(double minHz,double maxHz){this.minHz=minHz;this.maxHz=maxHz;}
 
-    /** Hot-loop form: detector age is derived from the audio sample clock. */
     public void observe(float sample){
         inputSamplesSeen++;
         if(++decimator<DECIMATION)return;decimator=0;
@@ -33,10 +28,8 @@ public final class PredictableFrequencyDiscovery {
         update(Math.round(inputSamplesSeen*1000.0/INPUT_RATE));
     }
 
-    /** Compatibility overload; the external wall-clock value is intentionally ignored. */
     public void observe(float sample,long ignoredNowMs){observe(sample);}
 
-    /** Deterministic test/replay hook. */
     void observeAt(float sample,long nowMs){
         inputSamplesSeen++;
         if(++decimator<DECIMATION)return;decimator=0;
@@ -46,11 +39,22 @@ public final class PredictableFrequencyDiscovery {
 
     private void update(long nowMs){
         float[] ordered=new float[ring.length];for(int i=0;i<ring.length;i++)ordered[i]=ring[(write+i)%ring.length];
-        List<SpectrumAnalyzer.DetectedTone> peaks=SpectrumAnalyzer.findPeaks(ordered,0,DECIMATED_RATE,minHz,maxHz,12,1.0);
+        List<SpectrumAnalyzer.DetectedTone> peaks=SpectrumAnalyzer.findPeaks(ordered,0,DECIMATED_RATE,minHz,maxHz,18,1.0);
         List<BroadbandDetector.Candidate> ready=detector.update(peaks,nowMs);
+        latestCandidates=List.copyOf(ready);
         double[] f=new double[ready.size()];for(int i=0;i<f.length;i++)f[i]=ready.get(i).frequencyHz();Arrays.sort(f);latest=f;
     }
 
     public double[] frequenciesHz(){return Arrays.copyOf(latest,latest.length);}
-    public void reset(){Arrays.fill(ring,0f);write=count=decimator=sinceUpdate=0;inputSamplesSeen=0;latest=new double[0];detector.reset();}
+    public List<BroadbandDetector.Candidate> candidates(){return latestCandidates;}
+    public String summary(){
+        if(latestCandidates.isEmpty())return"no mature predictable lines";
+        StringBuilder b=new StringBuilder();int n=Math.min(6,latestCandidates.size());
+        for(int i=0;i<n;i++){
+            BroadbandDetector.Candidate c=latestCandidates.get(i);if(i>0)b.append(" | ");
+            b.append(String.format(java.util.Locale.US,"%.1fHz %.0fdBFS +%.1fdB",c.frequencyHz(),c.dbFs(),c.prominenceDb()));
+        }
+        return b.toString();
+    }
+    public void reset(){Arrays.fill(ring,0f);write=count=decimator=sinceUpdate=0;inputSamplesSeen=0;latest=new double[0];latestCandidates=List.of();detector.reset();}
 }
