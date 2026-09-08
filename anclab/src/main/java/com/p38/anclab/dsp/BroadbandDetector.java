@@ -6,16 +6,21 @@ import java.util.List;
 
 /** Confirms coherent spectral lines across independent full-band scans before ANC may probe them. */
 public final class BroadbandDetector {
-    public record Candidate(String id, double frequencyHz, double dbFs, int confirmations) { }
+    public record Candidate(String id,double frequencyHz,double dbFs,double localFloorDbFs,double prominenceDb,int confirmations) {
+        public double score(){return Math.max(0.0,prominenceDb)*Math.log1p(Math.max(1,confirmations));}
+    }
     private static final long MINIMUM_AGE_MS = 1000;
     private static final long STALE_MS = 2500;
-    private static final double MATCH_RADIUS_HZ = 0.65;
+    private static final double MATCH_RADIUS_HZ = 0.90;
+    /** Absolute sanity floor only; the principal admission metric is local prominence. */
+    private static final double ABSOLUTE_SANITY_FLOOR_DBFS=-112.0;
+    private static final double MINIMUM_PROMINENCE_DB=8.0;
     private final List<Track> tracks = new ArrayList<>();
 
     public synchronized List<Candidate> update(List<SpectrumAnalyzer.DetectedTone> detections, long nowMs) {
         for (Track track : tracks) track.seenThisScan = false;
         for (SpectrumAnalyzer.DetectedTone detection : detections) {
-            if (detection.dbFs() < -72.0) continue;
+            if (detection.dbFs() < ABSOLUTE_SANITY_FLOOR_DBFS || detection.prominenceDb()<MINIMUM_PROMINENCE_DB) continue;
             Track best = null;
             double bestDistance = Double.POSITIVE_INFINITY;
             for (Track track : tracks) {
@@ -26,7 +31,9 @@ public final class BroadbandDetector {
             }
             if (best == null) { best = new Track(detection.frequencyHz(), nowMs); tracks.add(best); }
             best.frequencyHz = best.tracker.update(detection.frequencyHz(), nowMs);
-            best.dbFs = detection.dbFs();
+            best.dbFs = 0.75*best.dbFs+0.25*detection.dbFs();
+            best.localFloorDbFs=0.75*best.localFloorDbFs+0.25*detection.localFloorDbFs();
+            best.prominenceDb=0.75*best.prominenceDb+0.25*detection.prominenceDb();
             best.confirmations++;
             best.lastSeenMs = nowMs;
             best.seenThisScan = true;
@@ -35,17 +42,13 @@ public final class BroadbandDetector {
         while (iterator.hasNext()) if (nowMs - iterator.next().lastSeenMs > STALE_MS) iterator.remove();
         List<Candidate> ready = new ArrayList<>();
         for (Track track : tracks) {
-            // Mature candidates are deliberately reconsidered on later scans instead of being
-            // emitted only once. If all fallback controller slots were occupied when a strong
-            // physical tone first matured, it can therefore still be admitted after capacity
-            // becomes available. VehicleNarrowbandBank remains responsible for duplicate,
-            // strength and lane-capacity policy.
             if (track.confirmations >= 3 && nowMs - track.firstSeenMs >= MINIMUM_AGE_MS) {
                 double bin = Math.rint(track.frequencyHz * 2.0) / 2.0;
                 ready.add(new Candidate(String.format(java.util.Locale.US, "broad-%.1f", bin),
-                        track.frequencyHz, track.dbFs, track.confirmations));
+                        track.frequencyHz, track.dbFs,track.localFloorDbFs,track.prominenceDb,track.confirmations));
             }
         }
+        ready.sort((a,b)->Double.compare(b.score(),a.score()));
         return List.copyOf(ready);
     }
 
@@ -56,7 +59,9 @@ public final class BroadbandDetector {
         final AdaptiveFrequencyTracker tracker = new AdaptiveFrequencyTracker();
         long lastSeenMs;
         double frequencyHz;
-        double dbFs;
+        double dbFs=-120.0;
+        double localFloorDbFs=-120.0;
+        double prominenceDb=0.0;
         int confirmations;
         boolean seenThisScan;
         Track(double frequencyHz, long nowMs) {
