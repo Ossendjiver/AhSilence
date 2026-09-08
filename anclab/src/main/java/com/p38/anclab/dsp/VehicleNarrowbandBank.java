@@ -61,6 +61,9 @@ public final class VehicleNarrowbandBank {
     private static final double ROOM_COEFFICIENT_SMOOTHING_SECONDS=0.180;
     private static final double ROOM_FREQUENCY_SMOOTHING_SECONDS=0.350;
     private static final double ROOM_MIN_CALIBRATED_PATH_MAGNITUDE=1.0e-5;
+    private static final double ROOM_DISCOVERY_MATCH_RADIUS_HZ=2.50;
+    private static final double ROOM_DISCOVERY_SEARCH_HALF_WIDTH_HZ=2.40;
+    private static final double ROOM_DISCOVERY_TRACK_HALF_WIDTH_HZ=3.50;
 
     private final ButterworthLowPass analysisLowPass=new ButterworthLowPass(SAMPLE_RATE,210.0);
     private final DcBlocker analysisDc=new DcBlocker(Math.exp(-2.0*Math.PI*3.0/SAMPLE_RATE));
@@ -327,7 +330,7 @@ public final class VehicleNarrowbandBank {
         String telem=telemetry==null?"":telemetry.status();
         if(controllable==0){
             status=directFeedbackLearning
-                    ?String.format(Locale.US,"Room calibrated-path feedback · quiet-discovering stable 8–200 Hz lines · %d found · %d cancelling · recipes update after %d successful observations",discovered.size(),cancelling,recipeSuccessUpdates())
+                    ?String.format(Locale.US,"Room calibrated-path feedback · dominant-mode tracking 40–200 Hz · %d found · %d cancelling · recipes update after %d successful observations",discovered.size(),cancelling,recipeSuccessUpdates())
                     :String.format(Locale.US,"No cancellable GPS/OBD lane · auto-discovering stable 8–200 Hz lines · %d found · %d cancelling · %d monitor-only%s",discovered.size(),cancelling,monitorOnly,telem.isEmpty()?"":"\n"+telem);
         }else{
             status=String.format(Locale.US,"Predictable narrowband · %d/%d telemetry · %d controllable · %d cancelling · %d monitor-only · %d learning%s",
@@ -353,8 +356,16 @@ public final class VehicleNarrowbandBank {
             discoveryAnalysisCounter=0;
             List<SpectrumAnalyzer.DetectedTone> peaks=SpectrumAnalyzer.findPeaks(window,first,ANALYSIS_RATE,
                     8.0,200.0,12,DISCOVERY_MIN_SEPARATION_HZ);
-            List<BroadbandDetector.Candidate> ready=new ArrayList<>(discoveryDetector.update(peaks,now));
-            ready.sort(Comparator.comparingDouble(BroadbandDetector.Candidate::score).reversed());
+            List<BroadbandDetector.Candidate> ready=new ArrayList<>(directFeedbackLearning
+                    ?discoveryDetector.update(peaks,now,ROOM_DISCOVERY_MATCH_RADIUS_HZ)
+                    :discoveryDetector.update(peaks,now));
+            ready.sort((a,b)->{
+                if(directFeedbackLearning){
+                    int level=Double.compare(b.dbFs(),a.dbFs());
+                    if(level!=0)return level;
+                }
+                return Double.compare(b.score(),a.score());
+            });
             for(BroadbandDetector.Candidate candidate:ready){
                 if(candidate.dbFs()<DISCOVERY_ADMISSION_FLOOR_DBFS||candidate.prominenceDb()<DISCOVERY_MIN_PROMINENCE_DB)continue;
                 if(nearOwnedFrequency(candidate.frequencyHz()))continue;
@@ -366,6 +377,9 @@ public final class VehicleNarrowbandBank {
                 if(candidateCancellable&&controllerSlots>=fallbackLaneLimit()&&replace==null)continue;
                 if(replace!=null){replace.controller.stop();discovered.remove(replace);}
                 DiscoveredLane lane=new DiscoveredLane(candidate.id(),candidate.frequencyHz(),now);
+                if(directFeedbackLearning)lane.tracker.setBounds(
+                        Math.max(8.0,candidate.frequencyHz()-ROOM_DISCOVERY_TRACK_HALF_WIDTH_HZ),
+                        Math.min(200.0,candidate.frequencyHz()+ROOM_DISCOVERY_TRACK_HALF_WIDTH_HZ));
                 lane.lastPeakDbFs=candidate.dbFs();
                 lane.referenceEpoch=totalAnalysisSamples;lane.referencePhase=lane.oscillator.phase;
                 lane.tracker.reset(lane.currentFrequencyHz,now);
@@ -382,17 +396,27 @@ public final class VehicleNarrowbandBank {
         while(iterator.hasNext()){
             DiscoveredLane l=iterator.next();
             double centre=l.currentFrequencyHz;
+            double discoverySearchHalfWidth=directFeedbackLearning
+                    ?ROOM_DISCOVERY_SEARCH_HALF_WIDTH_HZ:DISCOVERY_SEARCH_HALF_WIDTH_HZ;
             SpectrumSnapshot search=SpectrumAnalyzer.analyze(window,first,ANALYSIS_RATE,
-                    Math.max(8.0,centre-DISCOVERY_SEARCH_HALF_WIDTH_HZ),
-                    Math.min(200.0,centre+DISCOVERY_SEARCH_HALF_WIDTH_HZ),centre,l.referenceEpoch,l.referencePhase);
-            boolean lock=search.peakDbFs()>-112.0&&search.contrastDb()>1.5&&Math.abs(search.peakFrequencyHz()-centre)<=DISCOVERY_SEARCH_HALF_WIDTH_HZ;
+                    Math.max(8.0,centre-discoverySearchHalfWidth),
+                    Math.min(200.0,centre+discoverySearchHalfWidth),centre,l.referenceEpoch,l.referencePhase);
+            boolean lock=search.peakDbFs()>-112.0&&search.contrastDb()>1.5
+                    &&Math.abs(search.peakFrequencyHz()-centre)<=discoverySearchHalfWidth;
             double refined=centre;
             if(lock){
                 refined=l.tracker.update(search.peakFrequencyHz(),now);
                 l.lastStrongMs=now;l.lastPeakDbFs=search.peakDbFs();
                 refined=Math.max(8.0,Math.min(200.0,refined));
                 if(Math.abs(refined-l.currentFrequencyHz)>0.025){l.currentFrequencyHz=refined;moved=true;}
-                if(l.cancellable)l.controller.followFrequency(refined,now);
+                if(l.cancellable){
+                    l.controller.followFrequency(refined,now);
+                    if(directFeedbackLearning){
+                        double controlled=l.controller.output().frequencyHz();
+                        l.controller.refreshSecondaryPath(SecondaryPathFrequencyResponse.at(
+                                calibratedSecondaryPathFir,calibratedDelaySamples,calibratedSampleRateHz,controlled));
+                    }
+                }
             }
 
             double gain=0.0;

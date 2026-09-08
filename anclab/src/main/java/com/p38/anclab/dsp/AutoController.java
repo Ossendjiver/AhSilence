@@ -159,6 +159,22 @@ public final class AutoController {
         command = command.clampMagnitude(this.maximumGain);
     }
 
+    /** Refresh the route-calibrated complex path at the controller's current frequency. */
+    public synchronized void refreshSecondaryPath(Complex refreshedPath) {
+        if (!directErrorLearning || refreshedPath == null || refreshedPath.magnitude() < 1.0e-5) return;
+        if (secondaryPath.magnitude() >= 1.0e-5) {
+            if (command.magnitude() > 0 && (stage == Stage.VERIFY_HALF || stage == Stage.VERIFY_FULL
+                    || stage == Stage.RUNNING || stage == Stage.VERIFY_FINE || stage == Stage.FOLLOW_VERIFY
+                    || stage == Stage.AUDIT_OFF || stage == Stage.AUDIT_ON)) {
+                Complex predictedSpeakerContribution = secondaryPath.multiply(command);
+                command = predictedSpeakerContribution.divide(refreshedPath).clampMagnitude(maximumGain);
+            }
+            secondaryPath = refreshedPath;
+        } else if (stage == Stage.BASELINE || learnedSecondaryPath.magnitude() >= 1.0e-5) {
+            learnedSecondaryPath = refreshedPath;
+        }
+    }
+
     /**
      * Follow a measured/predicted tone without continuously invalidating an in-flight path probe.
      * During BASELINE/PROBE/VERIFY calibration the controller holds its acoustic centre through small
