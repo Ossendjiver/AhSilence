@@ -1,10 +1,9 @@
-name: Apply Room ANC v0.6.2 patch
+name: Apply Room ANC v0.6.3 effectiveness and UI patch
 on:
   push:
     branches: [ feature/room-anc-v062 ]
     paths:
-      - 'tools/apply_room_v062_patch.py'
-      - 'tools/apply_room_v062_direct_error_tuning.py'
+      - 'tools/apply_room_v063_effectiveness_ui.py'
       - '.github/workflows/apply-room-v062-patch.yml'
 permissions:
   contents: write
@@ -16,15 +15,13 @@ jobs:
         with:
           ref: feature/room-anc-v062
           fetch-depth: 0
-      - name: Apply Room direct-error tuning
-        run: python3 tools/apply_room_v062_direct_error_tuning.py
-      - name: Commit Room direct-error tuning
+      - name: Apply Room effectiveness verification and profile UI
+        run: python3 tools/apply_room_v063_effectiveness_ui.py
+      - name: Commit Room v0.6.3 update
         run: |
           git config user.name 'Ossendjiver'
           git config user.email '39517879+Ossendjiver@users.noreply.github.com'
-          git add anclab/src/main/java/com/p38/anclab/dsp/AutoController.java \
-                  anclab/src/main/java/com/p38/anclab/dsp/VehicleNarrowbandBank.java \
-                  anclab/src/main/java/com/p38/anclab/audio/AudioEngine.java
+          git add anclab .github/workflows/build-anclab.yml
           git diff --cached --check
-          git commit -m 'Strengthen Room direct-error adaptation'
+          git commit -m 'Verify Room ANC effectiveness and reorganize profile settings'
           git push origin HEAD:feature/room-anc-v062
