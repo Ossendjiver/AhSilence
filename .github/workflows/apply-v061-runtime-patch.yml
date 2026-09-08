@@ -1,0 +1,31 @@
+name: Apply v0.6.1 runtime patch
+on:
+  push:
+    branches: [ feature/multisensor-anc-v060 ]
+    paths:
+      - 'tools/apply_v061_runtime_patch.py'
+      - '.github/workflows/apply-v061-runtime-patch.yml'
+permissions:
+  contents: write
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feature/multisensor-anc-v060
+          fetch-depth: 0
+      - name: Apply patch
+        run: python3 tools/apply_v061_runtime_patch.py
+      - name: Commit integrated runtime
+        run: |
+          git config user.name 'Ossendjiver'
+          git config user.email '39517879+Ossendjiver@users.noreply.github.com'
+          git add anclab/src/main/java/com/p38/anclab/dsp/AutoController.java \
+                  anclab/src/main/java/com/p38/anclab/dsp/HeadphoneFeedforwardFxNlms.java \
+                  anclab/src/main/java/com/p38/anclab/dsp/VehicleNarrowbandBank.java \
+                  anclab/src/main/java/com/p38/anclab/audio/AudioEngine.java \
+                  anclab/build.gradle.kts
+          git diff --cached --check
+          git commit -m 'Integrate adaptive discovery and headphone tone ownership'
+          git push origin HEAD:feature/multisensor-anc-v060
