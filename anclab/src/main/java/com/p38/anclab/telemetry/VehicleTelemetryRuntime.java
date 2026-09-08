@@ -156,7 +156,11 @@ public final class VehicleTelemetryRuntime {
 
     private double estimatedP38Rpm(double speedKmh){
         if(!ProfileStore.PROFILE_P38.equals(activeProfile)||!Double.isFinite(speedKmh))return Double.NaN;
-        if(speedKmh<=3.0)return P38_IDLE_RPM;
+        // At rest, GPS speed alone cannot tell us whether the engine is running, much less its
+        // exact idle speed.  Treating 0 km/h as a synthetic 714-rpm telemetry source used to create
+        // eight apparently "controllable" P38 engine lanes and globally suppress microphone
+        // discovery.  Let the microphone discover stationary/idle tones when real OBD RPM is absent.
+        if(speedKmh<=3.0)return Double.NaN;
         if(speedKmh>=55.0&&speedKmh<=125.0)return Math.max(P38_IDLE_RPM,speedKmh*P38_HIGHWAY_RPM_PER_KMH);
         return Double.NaN; // lower gears cannot be inferred safely from speed alone
     }

@@ -10,8 +10,8 @@ android {
         applicationId = "com.p38.anclab"
         minSdk = 26
         targetSdk = 35
-        versionCode = 26
-        versionName = "0.6.8-calibrated-micro-refinement-dev"
+        versionCode = 27
+        versionName = "0.6.9-visible-coexistent-discovery-dev"
     }
 
     signingConfigs {
@@ -41,6 +41,6 @@ android {
 }
 
 dependencies {
-    // ANC v0.6.8 adds one bounded calibration-gated micro-refinement when the stored low-frequency path misses, shared across Room, P38 and E46.
+    // ANC v0.6.9 separates persistent-frequency observation from controller admission and allows safe discovery to coexist with telemetry.
     testImplementation("junit:junit:4.13.2")
 }

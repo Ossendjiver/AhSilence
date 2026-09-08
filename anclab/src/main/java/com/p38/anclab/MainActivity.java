@@ -176,7 +176,7 @@ public final class MainActivity extends Activity {
     private String profileName(){return profiles.loadProfileName(currentProfile);}
     private final Runnable statusTick=new Runnable(){@Override public void run(){
         if(runtimeText!=null){String safety=rt.audio.getSafetyStatus();runtimeText.setText(String.format(Locale.US,"%s · %s · mic %.5f RMS · drive %.5f RMS · limit %d%%%s",rt.audio.isRunning()?"RUNNING":"STOPPED",profileName(),rt.audio.getInputRms(),rt.audio.getOutputRms(),rt.audio.getAntiNoisePercent(),safety==null||safety.isEmpty()?"":"\n"+safety));}
-        if(!isHeadphones()&&laneCountText!=null&&laneListText!=null){laneCountText.setText(String.format(Locale.US,"%d lanes monitored · %d actively cancelling",VehicleLaneRegistry.monitoredCount(),VehicleLaneRegistry.activeCount()));laneListText.setText(VehicleLaneRegistry.summary());}
+        if(!isHeadphones()&&laneCountText!=null&&laneListText!=null){laneCountText.setText(String.format(Locale.US,"%d control lanes · %d persistent tones observed · %d actively cancelling",VehicleLaneRegistry.monitoredCount(),VehicleLaneRegistry.observedCount(),VehicleLaneRegistry.activeCount()));laneListText.setText(VehicleLaneRegistry.summary());}
         if(startButton!=null)startButton.setText(rt.audio.isRunning()?"STOP ANC":isHeadphones()?"START HEADPHONE ANC":isRoom()?"START ROOM ANC":"START VEHICLE ANC");handler.postDelayed(this,400);
     }};
 

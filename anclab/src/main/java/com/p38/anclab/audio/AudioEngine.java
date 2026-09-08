@@ -86,6 +86,7 @@ public final class AudioEngine {
     private int observedSafetyTrips=0,safetyTripsInWindow=0;
     private long safetyWindowStartMs=0L;
     private long lastVehicleFrequencyRevision=-1L,lastVehicleExcluderUpdateMs=0L;
+    private int digitalSilenceFrames=0;
 
     private final Object graphLock=new Object();
     private final float[] graphReference=new float[GRAPH_POINTS],graphDrive=new float[GRAPH_POINTS],graphPredictedCancellation=new float[GRAPH_POINTS],graphPredictedResidual=new float[GRAPH_POINTS];
@@ -200,7 +201,7 @@ public final class AudioEngine {
     private boolean startInternal(Mode requested,String profileId,boolean broadbandEnabled,List<MechanicalFrequency> mechanicalModels){
         if(running.get())return true;
         try{
-            mode=requested;activeProfile=profileId;vehicleBroadbandEnabled=broadbandEnabled;safetyStatus="";lastError="None";
+            mode=requested;activeProfile=profileId;vehicleBroadbandEnabled=broadbandEnabled;safetyStatus="";lastError="None";digitalSilenceFrames=0;
             record=buildRecord();track=buildTrack();if(record==null||track==null)throw new IllegalStateException("Could not open selected audio route");
             clearGraph();record.startRecording();track.play();track.write(new float[192],0,192,AudioTrack.WRITE_BLOCKING);
             AudioDeviceInfo routed=track.getRoutedDevice();
@@ -263,6 +264,17 @@ public final class AudioEngine {
                 out[i]=y;outputEnergy+=y*y;graphSample(ref,y,cancel,residual);
             }
             int w=track.write(out,0,n,AudioTrack.WRITE_BLOCKING);if(w==AudioTrack.ERROR_DEAD_OBJECT){lastError="Audio output disconnected · ANC stopped";break;}if(w<0){lastError="AudioTrack write error "+w;break;}
+            // A physical microphone has analogue/self noise. One full second of exactly zero-valued
+            // float samples means Android has handed us a silent/invalid capture stream, not that the
+            // environment simply contains no discoverable tone. Fail visibly instead of silently
+            // running an empty detector for the rest of the session.
+            if(inputEnergy<=1.0e-20){
+                digitalSilenceFrames+=n;
+                if(digitalSilenceFrames>=SAMPLE_RATE){
+                    lastError="Microphone input is digital silence · ANC stopped · reselect the input route and re-run calibration if it recurs";
+                    safetyStatus=lastError;running.set(false);
+                }
+            }else digitalSilenceFrames=0;
             if(mode==Mode.HEADPHONES&&headphoneFx!=null){inputRms=headphoneFx.inputRms();outputRms=(float)Math.sqrt(outputEnergy/Math.max(1,n));checkSafetyTrips(headphoneFx.safetyTrips(),headphoneFx.safetyStatus());if((safetyStatus==null||safetyStatus.isEmpty())&&headphoneTones!=null)safetyStatus=headphoneTones.status();}
             else if(mode==Mode.VEHICLE||mode==Mode.ROOM){
                 inputRms=(float)Math.sqrt(inputEnergy/Math.max(1,n));outputRms=(float)Math.sqrt(outputEnergy/Math.max(1,n));
@@ -319,7 +331,7 @@ public final class AudioEngine {
     private AudioDeviceInfo findOutputDevice(int id){if(id==0)return null;for(AudioDeviceInfo d:audioManager.getDevices(AudioManager.GET_DEVICES_OUTPUTS))if(d.getId()==id)return d;return null;}
     private static boolean sameDb(float a,float b){return(!Float.isFinite(a)&&!Float.isFinite(b))||(Float.isFinite(a)&&Float.isFinite(b)&&Math.abs(a-b)<0.01f);}
 
-    public synchronized void stop(){running.set(false);if(worker!=null&&worker!=Thread.currentThread()){try{worker.join(700);}catch(Exception ignored){}}worker=null;persistVehicleRecipesNow();try{if(record!=null){record.stop();record.release();}}catch(Exception ignored){}try{if(track!=null){track.pause();track.flush();track.stop();track.release();}}catch(Exception ignored){}record=null;track=null;headphoneFx=null;headphoneTones=null;lastHeadphoneToneRevision=-1L;vehicleFx=null;vehicleNarrowband=null;vehicleExcluder=null;mode=Mode.NONE;monitoringLog.stop();if(recorder.isActive())recorder.stop();inputRms=outputRms=0f;expectedOutputRouteId=0;observedSafetyTrips=safetyTripsInWindow=0;routeGainCompensation=1f;lastVehicleFrequencyRevision=-1;}
+    public synchronized void stop(){running.set(false);if(worker!=null&&worker!=Thread.currentThread()){try{worker.join(700);}catch(Exception ignored){}}worker=null;persistVehicleRecipesNow();try{if(record!=null){record.stop();record.release();}}catch(Exception ignored){}try{if(track!=null){track.pause();track.flush();track.stop();track.release();}}catch(Exception ignored){}record=null;track=null;headphoneFx=null;headphoneTones=null;lastHeadphoneToneRevision=-1L;vehicleFx=null;vehicleNarrowband=null;vehicleExcluder=null;mode=Mode.NONE;monitoringLog.stop();if(recorder.isActive())recorder.stop();inputRms=outputRms=0f;expectedOutputRouteId=0;observedSafetyTrips=safetyTripsInWindow=0;routeGainCompensation=1f;lastVehicleFrequencyRevision=-1;digitalSilenceFrames=0;}
 
     private void persistVehicleRecipesNow(){
         VehicleNarrowbandBank bank=vehicleNarrowband;if(bank==null)return;
