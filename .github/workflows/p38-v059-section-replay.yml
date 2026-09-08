@@ -4,9 +4,6 @@ on:
   push:
     branches:
       - test/p38-v059-section-replay
-    paths:
-      - 'tools/p38_v059_section_acquisition.py'
-      - '.github/workflows/p38-v059-section-replay.yml'
   workflow_dispatch:
 
 permissions:
@@ -20,6 +17,10 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
       - name: Install replay dependencies
         run: pip install numpy scipy gdown
       - name: Download real P38 WAV from Drive
@@ -28,6 +29,30 @@ jobs:
           ls -lh P38.wav
       - name: Run section acquisition replays
         run: python tools/p38_v059_section_acquisition.py P38.wav --out p38-v059-section-results
+      - name: Compile exact production fallback controller replay
+        run: |
+          mkdir -p replay-classes
+          javac -d replay-classes \
+            tools/replaystubs/com/p38/anclab/profile/MechanicalFrequency.java \
+            tools/replaystubs/com/p38/anclab/telemetry/VehicleTelemetryRuntime.java \
+            anclab/src/main/java/com/p38/anclab/profile/VehicleCancellationRecipe.java \
+            anclab/src/main/java/com/p38/anclab/dsp/Complex.java \
+            anclab/src/main/java/com/p38/anclab/dsp/SpectrumSnapshot.java \
+            anclab/src/main/java/com/p38/anclab/dsp/Radix2Spectrum.java \
+            anclab/src/main/java/com/p38/anclab/dsp/SpectrumAnalyzer.java \
+            anclab/src/main/java/com/p38/anclab/dsp/AdaptiveFrequencyTracker.java \
+            anclab/src/main/java/com/p38/anclab/dsp/AutoController.java \
+            anclab/src/main/java/com/p38/anclab/dsp/ButterworthLowPass.java \
+            anclab/src/main/java/com/p38/anclab/dsp/DcBlocker.java \
+            anclab/src/main/java/com/p38/anclab/dsp/FrequencyLanePolicy.java \
+            anclab/src/main/java/com/p38/anclab/dsp/BroadbandDetector.java \
+            anclab/src/main/java/com/p38/anclab/dsp/VehicleRecipeBook.java \
+            anclab/src/main/java/com/p38/anclab/dsp/VehicleLaneRegistry.java \
+            anclab/src/main/java/com/p38/anclab/dsp/VehicleNarrowbandBank.java \
+            tools/replay/P38SectionClosedLoopReplay.java
+      - name: Run exact 20-200 s cold/warm synthetic-path replay
+        run: |
+          java -cp replay-classes replay.P38SectionClosedLoopReplay P38.wav p38-v059-section-results/exact_closed_loop_20_200.csv
       - name: Upload replay outputs
         uses: actions/upload-artifact@v4
         with:
