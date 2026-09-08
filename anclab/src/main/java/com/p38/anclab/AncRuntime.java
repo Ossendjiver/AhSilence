@@ -3,6 +3,7 @@ package com.p38.anclab;
 import android.content.Context;
 import com.p38.anclab.audio.AudioEngine;
 import com.p38.anclab.recording.AppLog;
+import com.p38.anclab.sensors.SensorLearningRecorder;
 import com.p38.anclab.storage.AncStorage;
 import com.p38.anclab.telemetry.VehicleTelemetryRuntime;
 
@@ -10,10 +11,12 @@ public final class AncRuntime {
     private static AncRuntime instance;
     public final AncStorage storage;
     public final AudioEngine audio;
+    public final SensorLearningRecorder sensorLearning;
     private AncRuntime(Context c){
         storage=new AncStorage(c);
         AppLog.init(storage);
         VehicleTelemetryRuntime.initialize(c,storage);
+        sensorLearning=new SensorLearningRecorder(storage);
         audio=new AudioEngine(c,storage);
     }
     public static synchronized AncRuntime get(Context c){if(instance==null)instance=new AncRuntime(c.getApplicationContext());return instance;}
