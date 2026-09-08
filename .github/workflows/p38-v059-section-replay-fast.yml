@@ -1,0 +1,65 @@
+name: P38 v0.5.9 accelerated section replay
+
+on:
+  push:
+    branches:
+      - test/p38-v059-section-replay
+    paths:
+      - 'tools/replay/ReplayClock.java'
+      - 'tools/replay/P38SectionSyntheticClockReplay.java'
+      - '.github/workflows/p38-v059-section-replay-fast.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  replay-fast:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Download real P38 WAV
+        run: |
+          pip install gdown
+          gdown 1NiNG6CORVcKrDd9YZGPVpkCqsQUewG6J -O P38.wav
+      - name: Prepare production class with deterministic replay clock
+        run: |
+          mkdir -p replay-src/com/p38/anclab/dsp replay-classes p38-v059-fast-results
+          sed 's/System\.currentTimeMillis()/replay.ReplayClock.nowMs()/g' \
+            anclab/src/main/java/com/p38/anclab/dsp/VehicleNarrowbandBank.java \
+            > replay-src/com/p38/anclab/dsp/VehicleNarrowbandBank.java
+      - name: Compile production controller logic
+        run: |
+          javac -d replay-classes \
+            tools/replaystubs/com/p38/anclab/profile/MechanicalFrequency.java \
+            tools/replaystubs/com/p38/anclab/telemetry/VehicleTelemetryRuntime.java \
+            anclab/src/main/java/com/p38/anclab/profile/VehicleCancellationRecipe.java \
+            anclab/src/main/java/com/p38/anclab/dsp/Complex.java \
+            anclab/src/main/java/com/p38/anclab/dsp/SpectrumSnapshot.java \
+            anclab/src/main/java/com/p38/anclab/dsp/Radix2Spectrum.java \
+            anclab/src/main/java/com/p38/anclab/dsp/SpectrumAnalyzer.java \
+            anclab/src/main/java/com/p38/anclab/dsp/AdaptiveFrequencyTracker.java \
+            anclab/src/main/java/com/p38/anclab/dsp/AutoController.java \
+            anclab/src/main/java/com/p38/anclab/dsp/ButterworthLowPass.java \
+            anclab/src/main/java/com/p38/anclab/dsp/DcBlocker.java \
+            anclab/src/main/java/com/p38/anclab/dsp/FrequencyLanePolicy.java \
+            anclab/src/main/java/com/p38/anclab/dsp/BroadbandDetector.java \
+            anclab/src/main/java/com/p38/anclab/dsp/VehicleRecipeBook.java \
+            anclab/src/main/java/com/p38/anclab/dsp/VehicleLaneRegistry.java \
+            tools/replay/ReplayClock.java \
+            replay-src/com/p38/anclab/dsp/VehicleNarrowbandBank.java \
+            tools/replay/P38SectionSyntheticClockReplay.java
+      - name: Replay real 20-200 s WAV section
+        run: java -cp replay-classes replay.P38SectionSyntheticClockReplay P38.wav p38-v059-fast-results/exact_logic_20_200.csv
+      - uses: actions/upload-artifact@v4
+        with:
+          name: P38-v0.5.9-accelerated-section-replay
+          path: p38-v059-fast-results/**
+          retention-days: 14
