@@ -1,0 +1,37 @@
+name: P38 v0.5.9 section replay
+
+on:
+  push:
+    branches:
+      - test/p38-v059-section-replay
+    paths:
+      - 'tools/p38_v059_section_acquisition.py'
+      - '.github/workflows/p38-v059-section-replay.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  replay:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install replay dependencies
+        run: pip install numpy scipy gdown
+      - name: Download real P38 WAV from Drive
+        run: |
+          gdown --id 1NiNG6CORVcKrDd9YZGPVpkCqsQUewG6J -O P38.wav
+          ls -lh P38.wav
+      - name: Run section acquisition replays
+        run: python tools/p38_v059_section_acquisition.py P38.wav --out p38-v059-section-results
+      - name: Upload replay outputs
+        uses: actions/upload-artifact@v4
+        with:
+          name: P38-v0.5.9-real-WAV-section-replay
+          path: p38-v059-section-results/**
+          if-no-files-found: error
+          retention-days: 14
