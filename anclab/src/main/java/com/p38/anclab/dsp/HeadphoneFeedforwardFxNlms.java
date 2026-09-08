@@ -21,6 +21,7 @@ public final class HeadphoneFeedforwardFxNlms {
     private final HeadphoneBandLimiter secondaryObservationBand=new HeadphoneBandLimiter(SAMPLE_RATE,true);
     private final HeadphoneBandLimiter filteredXPathLowPass=new HeadphoneBandLimiter(SAMPLE_RATE,false);
     private final HeadphoneBandLimiter filteredXObservationBand=new HeadphoneBandLimiter(SAMPLE_RATE,true);
+    private final PredictableFrequencyDiscovery predictableDiscovery=new PredictableFrequencyDiscovery(15.0,600.0);
 
     private final float[] predictorWeights=new float[PREDICTOR_TAPS];
     private final float[] referenceHistory;
@@ -43,8 +44,6 @@ public final class HeadphoneFeedforwardFxNlms {
     private float controllerLeakage=0.00000001f;
     private float outputCeiling;
 
-    // User and route gains are deliberately separate. modelDrive is expressed in the calibrated
-    // acoustic-command domain; transportDrive is the sample sent through Android's media gain.
     private float userOutputScale=0.50f;
     private float routeGainCompensation=1f;
     private int safetyHoldSamples=0;
@@ -82,11 +81,13 @@ public final class HeadphoneFeedforwardFxNlms {
     public void setRouteGainCompensation(float v){routeGainCompensation=clamp(v,0f,4f);}
     public void notifyRouteGainChanged(){safetyHoldSamples=Math.max(safetyHoldSamples,(int)(0.35f*SAMPLE_RATE));safetyStatus="Media volume changed · ANC briefly ramped down";}
 
-    /** Called by the outer runtime when a feedback/runaway signature is detected. */
+    /** Vehicle-derived stable-line discovery is observational only until a dedicated tone layer owns it. */
+    public double[] discoveredPredictableFrequenciesHz(){return predictableDiscovery.frequenciesHz();}
+
     public void emergencyMuteAndReset(String reason){
         Arrays.fill(predictorWeights,0f);Arrays.fill(referenceHistory,0f);Arrays.fill(predictedHistory,0f);
         Arrays.fill(filteredPredictedHistory,0f);Arrays.fill(driveHistory,0f);Arrays.fill(predictorPathHistory,0f);
-        predictorErrorPower=signalPower=1e-8f;confidence=confidenceSmooth=0f;runawayCounter=0;
+        predictorErrorPower=signalPower=1e-8f;confidence=confidenceSmooth=0f;runawayCounter=0;predictableDiscovery.reset();
         seedControllerFromSecondaryPath();referenceBand.reset();outputLowPass.reset();secondaryObservationBand.reset();filteredXPathLowPass.reset();filteredXObservationBand.reset();
         safetyRamp=0f;safetyHoldSamples=(int)(1.5f*SAMPLE_RATE);safetyTrips++;
         safetyStatus="Safety rollback · "+reason;
@@ -95,6 +96,7 @@ public final class HeadphoneFeedforwardFxNlms {
     public float process(float referenceMic){
         lastRawReference=referenceMic;
         float x=referenceBand.process(referenceMic);
+        predictableDiscovery.observe(x,System.currentTimeMillis());
         referenceHistory[referencePos]=x;samplesSeen++;
 
         boolean adaptationAllowed=safetyHoldSamples<=0&&safetyRamp>0.95f;
@@ -106,8 +108,6 @@ public final class HeadphoneFeedforwardFxNlms {
         confidenceSmooth=0.998f*confidenceSmooth+0.002f*confidence;
         float outputGate=smoothstep(0.05f,0.45f,confidenceSmooth);
 
-        // Route changes are muted for 350 ms and return over ~50 ms. This avoids the short period
-        // where Android's hardware/media gain and the stored secondary-path gain disagree.
         if(safetyHoldSamples>0){safetyHoldSamples--;safetyRamp=Math.max(0f,safetyRamp-1f/480f);}else{safetyRamp=Math.min(1f,safetyRamp+1f/2400f);}
 
         predictedHistory[predictedPos]=predictedFuture;
@@ -116,8 +116,6 @@ public final class HeadphoneFeedforwardFxNlms {
         float modelDrive=outputLowPass.process(clamp(rawDrive,-modelCeiling,modelCeiling));
         modelDrive=clamp(modelDrive,-modelCeiling,modelCeiling)*safetyRamp;
 
-        // Keep the acoustic command at its calibrated level as Android media volume changes.
-        // Transport can rise when media volume is lowered, but is hard-limited to PCM float safety.
         float transportDrive=clamp(modelDrive*routeGainCompensation,-0.5f,0.5f);
         driveHistory[drivePos]=modelDrive;
         float predictedCancellation=secondaryObservationBand.process(convolveSecondary(driveHistory,drivePos));
@@ -133,8 +131,6 @@ public final class HeadphoneFeedforwardFxNlms {
             for(int k=0;k<CONTROLLER_TAPS;k++){int idx=filteredPos-k;if(idx<0)idx+=CONTROLLER_TAPS;controllerWeights[k]=clamp((1f-controllerLeakage)*controllerWeights[k]-step*filteredPredictedHistory[idx],-CONTROLLER_WEIGHT_LIMIT,CONTROLLER_WEIGHT_LIMIT);}
         }
 
-        // Local runaway detector: sustained anti-noise much larger than the filtered reference is
-        // characteristic of the feedback bursts seen in field WAVs, not useful cancellation.
         float currentIn=(float)Math.sqrt(Math.max(inRms,1e-12f));
         float currentModel=(float)Math.sqrt(Math.max(modelOutRms,1e-12f));
         boolean suspect=currentModel>0.020f&&currentModel>12f*Math.max(currentIn,0.00005f);
