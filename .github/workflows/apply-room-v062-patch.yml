@@ -4,6 +4,7 @@ on:
     branches: [ feature/room-anc-v062 ]
     paths:
       - 'tools/apply_room_v062_patch.py'
+      - 'tools/apply_room_v062_direct_error_tuning.py'
       - '.github/workflows/apply-room-v062-patch.yml'
 permissions:
   contents: write
@@ -15,18 +16,15 @@ jobs:
         with:
           ref: feature/room-anc-v062
           fetch-depth: 0
-      - name: Apply Room ANC patch
-        run: python3 tools/apply_room_v062_patch.py
-      - name: Commit integrated Room runtime
+      - name: Apply Room direct-error tuning
+        run: python3 tools/apply_room_v062_direct_error_tuning.py
+      - name: Commit Room direct-error tuning
         run: |
           git config user.name 'Ossendjiver'
           git config user.email '39517879+Ossendjiver@users.noreply.github.com'
-          git add anclab/src/main/java/com/p38/anclab/profile/ProfileStore.java \
+          git add anclab/src/main/java/com/p38/anclab/dsp/AutoController.java \
                   anclab/src/main/java/com/p38/anclab/dsp/VehicleNarrowbandBank.java \
-                  anclab/src/main/java/com/p38/anclab/audio/AudioEngine.java \
-                  anclab/src/main/java/com/p38/anclab/MainActivity.java \
-                  anclab/src/main/java/com/p38/anclab/AncMediaService.java \
-                  anclab/build.gradle.kts
+                  anclab/src/main/java/com/p38/anclab/audio/AudioEngine.java
           git diff --cached --check
-          git commit -m 'Add direct-feedback Room ANC profile'
+          git commit -m 'Strengthen Room direct-error adaptation'
           git push origin HEAD:feature/room-anc-v062
