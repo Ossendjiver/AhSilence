@@ -41,5 +41,6 @@ android {
 }
 
 dependencies {
+    // Room ANC v0.6.3 includes recurring muted A/B effectiveness verification.
     testImplementation("junit:junit:4.13.2")
 }
