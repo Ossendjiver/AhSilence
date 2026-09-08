@@ -5,7 +5,7 @@ import java.util.List;
 
 /** Applies calibrated timing/gain/bias results to persisted sensor definitions. */
 public final class SensorCalibrationCoordinator {
-    public enum Stage { INVENTORY, STATIC_SENSOR_CALIBRATION, RP2040_INPUT_VERIFY, MICROPHONE_GAIN, OUTPUT_ROUTE_LATENCY, SECONDARY_PATH, CROSS_CHANNEL_VERIFY, COMPLETE }
+    public enum Stage { INVENTORY, STATIC_SENSOR_CALIBRATION, RP2040_INPUT_VERIFY, MICROPHONE_GAIN, REFERENCE_PREVIEW, OUTPUT_ROUTE_LATENCY, SECONDARY_PATH, CROSS_CHANNEL_VERIFY, COMPLETE }
     private SensorCalibrationCoordinator(){}
 
     public static List<String> plan(List<AncSensorDefinition> sensors){
@@ -14,10 +14,12 @@ public final class SensorCalibrationCoordinator {
         p.add("2. ADXL345: collect six stationary +X/-X/+Y/-Y/+Z/-Z poses and solve bias/scale for each axis.");
         p.add("3. RP2040 input clock: verify both accelerometers and all four microphone channels carry one monotonic RP2040 sample counter; measure any fixed per-channel skew, but do not independently align them to Android time.");
         p.add("4. TLV320ADC5140 microphones: equalise gain using a common acoustic probe and verify polarity/channel order while retaining RP2040 timestamps.");
-        p.add("5. Output route: select AUX, wired/wireless Android Auto, direct USB DAC or other route; repeat a known probe at least five times and measure phone/tablet → head-unit → amplifier → speaker → B-pillar latency plus p95 jitter.");
-        p.add("6. Stereo secondary path: run low-level decorrelated L/R probes and identify L→L, L→R, R→L and R→R speaker/error-mic paths on the RP2040 time base.");
-        p.add("7. Cross-channel verification: confirm crosstalk, repeatability, route signature, head-unit volume/EQ/DSP state and that latency jitter remains within the calibrated confidence envelope.");
-        p.add("8. Enable SENSOR_PRIMARY only when both sides have calibrated reference/error channels and a calibrated, repeatable output route. Legacy ANC remains independent fallback/secondary control.");
+        p.add("5. Reference preview: on representative vibration/road events, cross-correlate each ADXL345 and footwell reference mic against both B-pillar error mics to measure how much advance warning each physical reference actually provides, including jitter/confidence.");
+        p.add("6. Output route: select AUX, wired/wireless Android Auto, direct USB DAC or other route; repeat a known probe at least five times and measure phone/tablet → head-unit → amplifier → speaker → B-pillar latency plus p95 jitter.");
+        p.add("7. Stereo secondary path: run low-level decorrelated L/R probes and identify L→L, L→R, R→L and R→R command-to-error-mic paths on the RP2040 time base.");
+        p.add("8. Timing budget: compare reference lead with calibrated output delay. True stochastic feed-forward requires positive preview margin; periodic prediction may phase-advance through longer but stable routes.");
+        p.add("9. Cross-channel verification: confirm crosstalk, repeatability, route signature, head-unit volume/EQ/DSP state and that latency jitter remains within the calibrated confidence envelope.");
+        p.add("10. Enable SENSOR_PRIMARY only when both sides have calibrated reference/error channels and a calibrated, repeatable output route. Legacy ANC remains independent fallback/secondary control.");
         return p;
     }
 
@@ -43,7 +45,7 @@ public final class SensorCalibrationCoordinator {
         output.outputRoute=route==null?AncSensorDefinition.OutputRoute.UNASSIGNED:route;
         output.routeSignature=signature==null?"":signature.trim();
         output.latencyUs=c.medianLatencyUs();output.latencyJitterUs=c.p95JitterUs();output.latencyConfidence=c.confidence();
-        // A long route may still be usable for periodic/narrowband prediction. Repeatability, not absolute latency, gates calibration.
+        // A long route may still be useful for periodic prediction. Repeatability, not absolute latency, gates route calibration.
         output.calibrationState=(output.outputRoute!=AncSensorDefinition.OutputRoute.UNASSIGNED&&c.confidence()>=0.60)
                 ?AncSensorDefinition.CalibrationState.CALIBRATED:AncSensorDefinition.CalibrationState.PARTIAL;
         output.calibrationUtcMs=System.currentTimeMillis();
