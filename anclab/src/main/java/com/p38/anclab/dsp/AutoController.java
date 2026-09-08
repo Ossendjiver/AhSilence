@@ -276,6 +276,10 @@ public final class AutoController {
     }
 
     private void beginProbe(long nowMs) {
+        if (directErrorLearning) {
+            rejectActiveVerification("no trustworthy calibrated secondary path; lane quarantined");
+            return;
+        }
         double probeGain = Math.min(maximumGain, Math.max(0.0002, maximumGain * 0.5));
         command = Complex.polar(probeGain, 0.0);
         stage = Stage.PROBE_POSITIVE;
@@ -346,6 +350,10 @@ public final class AutoController {
         if (residual > baselineResidual * 1.03) {
             if (usingLearnedSecondaryPath) {
                 usingLearnedSecondaryPath = false;
+                if (directErrorLearning) {
+                    rejectActiveVerification("calibrated path increased the measured error");
+                    return;
+                }
                 command = Complex.ZERO;
                 beginProbe(nowMs);
                 return;
@@ -373,6 +381,10 @@ public final class AutoController {
         if (residual >= baselineResidual * requiredRatio) {
             if (usingLearnedSecondaryPath) {
                 usingLearnedSecondaryPath = false;
+                if (directErrorLearning) {
+                    rejectActiveVerification("calibrated path did not produce repeatable reduction");
+                    return;
+                }
                 command = Complex.ZERO;
                 beginProbe(nowMs);
                 return;

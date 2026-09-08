@@ -60,6 +60,7 @@ public final class VehicleNarrowbandBank {
     private static final long ROOM_DISCOVERY_INACTIVE_STALE_MS=15000;
     private static final double ROOM_COEFFICIENT_SMOOTHING_SECONDS=0.180;
     private static final double ROOM_FREQUENCY_SMOOTHING_SECONDS=0.350;
+    private static final double ROOM_MIN_CALIBRATED_PATH_MAGNITUDE=1.0e-5;
 
     private final ButterworthLowPass analysisLowPass=new ButterworthLowPass(SAMPLE_RATE,210.0);
     private final DcBlocker analysisDc=new DcBlocker(Math.exp(-2.0*Math.PI*3.0/SAMPLE_RATE));
@@ -73,6 +74,9 @@ public final class VehicleNarrowbandBank {
     private final double cancellationMinimumHz;
     private final double cancellationMaximumHz;
     private final boolean directFeedbackLearning;
+    private final float[] calibratedSecondaryPathFir;
+    private final int calibratedDelaySamples;
+    private final int calibratedSampleRateHz;
 
     private int ringPos=0,ringCount=0,decimator=0,sinceAnalysis=0,discoveryAnalysisCounter=0;
     private long totalAnalysisSamples=0;
@@ -103,8 +107,20 @@ public final class VehicleNarrowbandBank {
                                  float safeOutputCeiling,float userScale,
                                  double cancellationMinimumHz,double cancellationMaximumHz,
                                  String routeKey,List<VehicleCancellationRecipe> recipes,boolean directFeedbackLearning){
+        this(models,telemetry,safeOutputCeiling,userScale,cancellationMinimumHz,cancellationMaximumHz,
+                routeKey,recipes,directFeedbackLearning,null,0,SAMPLE_RATE);
+    }
+
+    public VehicleNarrowbandBank(List<MechanicalFrequency> models,VehicleTelemetryRuntime telemetry,
+                                 float safeOutputCeiling,float userScale,
+                                 double cancellationMinimumHz,double cancellationMaximumHz,
+                                 String routeKey,List<VehicleCancellationRecipe> recipes,boolean directFeedbackLearning,
+                                 float[] calibratedSecondaryPathFir,int calibratedDelaySamples,int calibratedSampleRateHz){
         this.telemetry=telemetry;
         this.directFeedbackLearning=directFeedbackLearning;
+        this.calibratedSecondaryPathFir=calibratedSecondaryPathFir==null?new float[0]:calibratedSecondaryPathFir.clone();
+        this.calibratedDelaySamples=Math.max(0,calibratedDelaySamples);
+        this.calibratedSampleRateHz=calibratedSampleRateHz>0?calibratedSampleRateHz:SAMPLE_RATE;
         totalCeiling=clamp(Math.abs(safeOutputCeiling),0.005f,0.15f);
         this.userScale=clamp(userScale,0f,1f);
         this.cancellationMinimumHz=Math.max(FrequencyLanePolicy.MONITOR_MINIMUM_HZ,
@@ -311,7 +327,7 @@ public final class VehicleNarrowbandBank {
         String telem=telemetry==null?"":telemetry.status();
         if(controllable==0){
             status=directFeedbackLearning
-                    ?String.format(Locale.US,"Room direct feedback · auto-discovering stable 8–200 Hz lines · %d found · %d cancelling · recipes update after %d successful observations",discovered.size(),cancelling,recipeSuccessUpdates())
+                    ?String.format(Locale.US,"Room calibrated-path feedback · quiet-discovering stable 8–200 Hz lines · %d found · %d cancelling · recipes update after %d successful observations",discovered.size(),cancelling,recipeSuccessUpdates())
                     :String.format(Locale.US,"No cancellable GPS/OBD lane · auto-discovering stable 8–200 Hz lines · %d found · %d cancelling · %d monitor-only%s",discovered.size(),cancelling,monitorOnly,telem.isEmpty()?"":"\n"+telem);
         }else{
             status=String.format(Locale.US,"Predictable narrowband · %d/%d telemetry · %d controllable · %d cancelling · %d monitor-only · %d learning%s",
@@ -332,7 +348,8 @@ public final class VehicleNarrowbandBank {
     private synchronized DiscoveryResult analyzeFallbackDiscovery(float[] window,long first,long now){
         boolean moved=false,changed=false;int cancelling=0;
 
-        if(++discoveryAnalysisCounter>=DISCOVERY_SCAN_EVERY_ANALYSES){
+        boolean allowAdmission=!directFeedbackLearning||!hasActiveRoomCancellationController();
+        if(++discoveryAnalysisCounter>=DISCOVERY_SCAN_EVERY_ANALYSES&&allowAdmission){
             discoveryAnalysisCounter=0;
             List<SpectrumAnalyzer.DetectedTone> peaks=SpectrumAnalyzer.findPeaks(window,first,ANALYSIS_RATE,
                     8.0,200.0,12,DISCOVERY_MIN_SEPARATION_HZ);
@@ -415,6 +432,14 @@ public final class VehicleNarrowbandBank {
         return new DiscoveryResult(moved,cancelling);
     }
 
+    private boolean hasActiveRoomCancellationController(){
+        for(DiscoveredLane lane:discovered){
+            if(!lane.cancellable||lane.auditRejected)continue;
+            if(!"IDLE".equals(lane.controller.stageName())||lane.controller.output().gain()>1e-7)return true;
+        }
+        return false;
+    }
+
     private int fallbackLaneLimit(){
         if(directFeedbackLearning)return ROOM_MAX_DISCOVERED_LANES;
         return broadbandEnabled?MAX_DISCOVERED_LANES_BROADBAND:MAX_DISCOVERED_LANES_NARROWBAND_ONLY;
@@ -483,9 +508,20 @@ public final class VehicleNarrowbandBank {
         lane.controller.setDirectErrorLearning(directFeedbackLearning);
         VehicleCancellationRecipe recipe=recipeBook.find(routeKey,"discovered",
                 MechanicalFrequency.SourceType.FIXED,lane.anchorFrequencyHz,lane.currentFrequencyHz);
-        if(recipe==null)lane.controller.startTracking(now,perLaneLimit(),lane.currentFrequencyHz,lane.label,false);
-        else lane.controller.startTrackingWithSecondaryPath(now,perLaneLimit(),lane.currentFrequencyHz,
-                lane.label,false,recipe.secondaryPath());
+        Complex seededPath=recipe==null?Complex.ZERO:recipe.secondaryPath();
+        if(directFeedbackLearning&&seededPath.magnitude()<ROOM_MIN_CALIBRATED_PATH_MAGNITUDE)
+            seededPath=SecondaryPathFrequencyResponse.at(calibratedSecondaryPathFir,calibratedDelaySamples,
+                    calibratedSampleRateHz,lane.currentFrequencyHz);
+        if(seededPath.magnitude()>=ROOM_MIN_CALIBRATED_PATH_MAGNITUDE){
+            lane.controller.startTrackingWithSecondaryPath(now,perLaneLimit(),lane.currentFrequencyHz,
+                    lane.label,false,seededPath);
+        }else if(directFeedbackLearning){
+            lane.controller.stop();
+            lane.auditRejected=true;
+            lane.auditRejectedMs=now;
+        }else{
+            lane.controller.startTracking(now,perLaneLimit(),lane.currentFrequencyHz,lane.label,false);
+        }
         lane.idleSinceMs=0;lane.successUpdates=0;
     }
 

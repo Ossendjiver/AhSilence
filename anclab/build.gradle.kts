@@ -10,8 +10,8 @@ android {
         applicationId = "com.p38.anclab"
         minSdk = 26
         targetSdk = 35
-        versionCode = 22
-        versionName = "0.6.4-room-smoothed-verification-dev"
+        versionCode = 23
+        versionName = "0.6.5-room-calibrated-path-dev"
     }
 
     signingConfigs {
@@ -41,6 +41,6 @@ android {
 }
 
 dependencies {
-    // Room ANC v0.6.3 includes recurring muted A/B effectiveness verification.
+    // Room ANC v0.6.5 seeds narrowband control from measured route calibration and forbids blind Room probes.
     testImplementation("junit:junit:4.13.2")
 }

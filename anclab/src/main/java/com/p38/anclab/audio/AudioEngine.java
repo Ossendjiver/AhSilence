@@ -44,6 +44,7 @@ public final class AudioEngine {
     private static final String TAG="AudioEngine";
     private static final int GRAPH_POINTS=720;
     private static final int GRAPH_DECIMATION=24;
+    private static final float ROOM_MIN_CANCELLATION_HZ=40f;
 
     private enum Mode { NONE, HEADPHONES, VEHICLE, ROOM }
     private final Context context;
@@ -179,7 +180,7 @@ public final class AudioEngine {
             if(best<0.025){saveCalibrationWavs(probe,captured);return new CalibrationResult(false,null,"Calibration probe was not detected clearly enough (quality "+String.format(Locale.US,"%.0f%%",best*100)+")");}
             int firLen=128;float[] h=new float[firLen],xh=new float[firLen];int xp=0;float mu=0.35f;int nFit=Math.min(probeLen-256,total-lead-bestLag-256);
             for(int nn=0;nn<nFit;nn++){float xx=probe[lead+nn];xh[xp]=xx;float yh=0,norm=1e-7f;int p=xp;for(int k=0;k<firLen;k++){yh+=h[k]*xh[p];norm+=xh[p]*xh[p];if(--p<0)p=firLen-1;}float target=captured[lead+bestLag+nn],err=target-yh,step=mu*err/norm;p=xp;for(int k=0;k<firLen;k++){h[k]+=step*xh[p];if(--p<0)p=firLen-1;}if(++xp==firLen)xp=0;}
-            HeadphoneCalibration c=new HeadphoneCalibration();c.profileId=activeProfile;c.sampleRateHz=SAMPLE_RATE;c.inputDeviceId=inputDeviceId;c.outputDeviceId=outputDeviceId;c.inputRoute=inputRoute;c.outputRoute=outputRoute;c.delaySamples=bestLag;c.quality=(float)best;c.utcMs=System.currentTimeMillis();c.secondaryPath=h;c.safeOutputCeiling=ProfileStore.PROFILE_HEADPHONES.equals(activeProfile)?(bestLag>2400?0.12f:0.18f):0.08f;c.minimumCancellationHz=(ProfileStore.PROFILE_HEADPHONES.equals(activeProfile)||ProfileStore.PROFILE_ROOM.equals(activeProfile))?15f:20f;c.maximumCancellationHz=ProfileStore.PROFILE_HEADPHONES.equals(activeProfile)?600f:200f;c.frequencyBandVerified=false;c.mediaVolumeIndex=volumeStart.index;c.mediaVolumeMax=volumeStart.max;c.mediaVolumeDb=volumeStart.db;calibration=c;saveCalibrationWavs(probe,captured);
+            HeadphoneCalibration c=new HeadphoneCalibration();c.profileId=activeProfile;c.sampleRateHz=SAMPLE_RATE;c.inputDeviceId=inputDeviceId;c.outputDeviceId=outputDeviceId;c.inputRoute=inputRoute;c.outputRoute=outputRoute;c.delaySamples=bestLag;c.quality=(float)best;c.utcMs=System.currentTimeMillis();c.secondaryPath=h;c.safeOutputCeiling=ProfileStore.PROFILE_HEADPHONES.equals(activeProfile)?(bestLag>2400?0.12f:0.18f):0.08f;c.minimumCancellationHz=ProfileStore.PROFILE_HEADPHONES.equals(activeProfile)?15f:ProfileStore.PROFILE_ROOM.equals(activeProfile)?ROOM_MIN_CANCELLATION_HZ:20f;c.maximumCancellationHz=ProfileStore.PROFILE_HEADPHONES.equals(activeProfile)?600f:200f;c.frequencyBandVerified=false;c.mediaVolumeIndex=volumeStart.index;c.mediaVolumeMax=volumeStart.max;c.mediaVolumeDb=volumeStart.db;calibration=c;saveCalibrationWavs(probe,captured);
             AppLog.i(TAG,"Route calibration complete profile="+activeProfile+" delay="+bestLag+" samples quality="+best+" signedCorr="+bestSigned+" mediaDb="+volumeStart.db);
             return new CalibrationResult(true,c,"Calibration complete");
         }catch(Exception e){lastError=e.getMessage();AppLog.e(TAG,"Calibration failed",e);return new CalibrationResult(false,null,"Calibration failed: "+e.getMessage());}
@@ -216,12 +217,14 @@ public final class AudioEngine {
                 }
                 vehicleNarrowband=new VehicleNarrowbandBank(room?List.of():mechanicalModels,telemetryForBank,
                         calibration.safeOutputCeiling,antiNoisePercent/100f,
-                        calibration.minimumCancellationHz,calibration.maximumCancellationHz,
-                        vehicleRecipeRouteKey(),profiles.loadCancellationRecipes(profileId),room);
+                        room?Math.max(ROOM_MIN_CANCELLATION_HZ,calibration.minimumCancellationHz):calibration.minimumCancellationHz,
+                        calibration.maximumCancellationHz,
+                        vehicleRecipeRouteKey(),profiles.loadCancellationRecipes(profileId),room,
+                        room?calibration.secondaryPath:null,room?calibration.delaySamples:0,calibration.sampleRateHz);
                 vehicleNarrowband.setBroadbandEnabled(broadbandEnabled);
                 lastVehicleFrequencyRevision=vehicleNarrowband.frequencyRevision();lastVehicleExcluderUpdateMs=System.currentTimeMillis();
                 if(broadbandEnabled){vehicleFx=new FeedbackFxNlms(calibration.secondaryPath,calibration.delaySamples,128,calibration.safeOutputCeiling);configureVehicleFx(vehicleFx);vehicleFx.setExcludedFrequencies(vehicleNarrowband.frequenciesHz());}else vehicleFx=null;
-                if(room)safetyStatus="Room direct-feedback loop ready · measured microphone residual feeds adaptive cancellation and recipes";
+                if(room)safetyStatus="Room calibrated-path feedback ready · quiet discovery · no blind acoustic probes · 40–200 Hz narrowband";
             }
             expectedOutputRouteId=routed==null?0:routed.getId();routeMissingBlocks=0;initializeVolumeCompensation();
             running.set(true);if(monitorLogEnabled)monitoringLog.start();worker=new Thread(this::runLoop,"ANC-Lab-Audio");worker.setPriority(Thread.MAX_PRIORITY);worker.start();
@@ -291,7 +294,8 @@ public final class AudioEngine {
 
     private String vehicleRecipeRouteKey(){
         long revision=calibration==null?0L:calibration.utcMs;
-        return activeProfile+"|in="+inputDeviceId+"|out="+outputDeviceId+"|cal="+revision;
+        String key=activeProfile+"|in="+inputDeviceId+"|out="+outputDeviceId+"|cal="+revision;
+        return ProfileStore.PROFILE_ROOM.equals(activeProfile)?key+"|roomPath=cal-v1":key;
     }
 
     private void checkSafetyTrips(int trips,String status){if(trips<=observedSafetyTrips)return;observedSafetyTrips=trips;safetyStatus=status;lastError=status;long now=System.currentTimeMillis();if(now-safetyWindowStartMs>15000){safetyWindowStartMs=now;safetyTripsInWindow=0;}safetyTripsInWindow++;if(safetyTripsInWindow>=3){lastError="ANC safety stop · repeated feedback/runaway detected";safetyStatus=lastError;running.set(false);}}
