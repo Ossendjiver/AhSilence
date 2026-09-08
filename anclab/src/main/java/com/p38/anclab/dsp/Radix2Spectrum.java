@@ -7,7 +7,10 @@ import java.util.List;
 
 /** Hann-windowed, zero-padded radix-2 FFT used for economical multi-tone discovery. */
 public final class Radix2Spectrum {
-    public record Peak(double frequencyHz, double amplitude) { }
+    /** A spectral peak plus the local neighbourhood floor used to judge prominence. */
+    public record Peak(double frequencyHz,double amplitude,double noiseFloorAmplitude,double prominenceDb) {
+        public Peak(double frequencyHz,double amplitude){this(frequencyHz,amplitude,1.0e-12,240.0);}
+    }
     private Radix2Spectrum() { }
 
     public static List<Peak> findPeaks(float[] samples, double sampleRateHz,
@@ -37,22 +40,42 @@ public final class Radix2Spectrum {
         for (int bin = first; bin <= last; bin++) amplitudes[bin - first] = Math.hypot(real[bin], imaginary[bin]) * scale;
         double[] sorted = amplitudes.clone();
         Arrays.sort(sorted);
-        double median = sorted[sorted.length / 2];
+        double globalMedian = sorted[sorted.length / 2];
+        double hzPerBin=sampleRateHz/fftSize;
+        int localRadius=Math.max(3,(int)Math.round(10.0/hzPerBin));
+        int exclusion=Math.max(1,(int)Math.round(Math.max(1.0,minimumSeparationHz)/hzPerBin));
 
         List<Peak> candidates = new ArrayList<>();
         for (int bin = first + 1; bin < last; bin++) {
-            double leftAmplitude = amplitudes[bin - first - 1];
-            double centreAmplitude = amplitudes[bin - first];
-            double rightAmplitude = amplitudes[bin - first + 1];
+            int index=bin-first;
+            double leftAmplitude = amplitudes[index - 1];
+            double centreAmplitude = amplitudes[index];
+            double rightAmplitude = amplitudes[index + 1];
+            // Keep the FFT front-end permissive. BroadbandDetector applies the conservative
+            // absolute sanity floor and prominence requirement after persistence is considered.
             if (centreAmplitude <= leftAmplitude || centreAmplitude < rightAmplitude
-                    || centreAmplitude <= Math.max(1.0e-5, median * 1.6)) continue;
+                    || centreAmplitude <= Math.max(2.0e-7, globalMedian * 1.20)) continue;
             double left = Math.log(leftAmplitude + 1.0e-12);
             double centre = Math.log(centreAmplitude + 1.0e-12);
             double right = Math.log(rightAmplitude + 1.0e-12);
             double denominator = left - 2.0 * centre + right;
             double offset = Math.abs(denominator) < 1.0e-12 ? 0
                     : Math.max(-0.5, Math.min(0.5, 0.5 * (left - right) / denominator));
-            candidates.add(new Peak((bin + offset) * sampleRateHz / fftSize, centreAmplitude));
+
+            int lo=Math.max(0,index-localRadius),hi=Math.min(amplitudes.length-1,index+localRadius);
+            double[] neighbourhood=new double[Math.max(0,hi-lo+1-(2*exclusion+1))];int q=0;
+            for(int j=lo;j<=hi;j++){
+                if(Math.abs(j-index)<=exclusion)continue;
+                if(q<neighbourhood.length)neighbourhood[q++]=amplitudes[j];
+            }
+            double localFloor=globalMedian;
+            if(q>0){
+                if(q<neighbourhood.length)neighbourhood=Arrays.copyOf(neighbourhood,q);
+                Arrays.sort(neighbourhood);localFloor=neighbourhood[neighbourhood.length/2];
+            }
+            localFloor=Math.max(1.0e-12,localFloor);
+            double prominenceDb=20.0*Math.log10(Math.max(centreAmplitude,1.0e-12)/localFloor);
+            candidates.add(new Peak((bin + offset) * sampleRateHz / fftSize, centreAmplitude,localFloor,prominenceDb));
         }
         candidates.sort(Comparator.comparingDouble(Peak::amplitude).reversed());
         List<Peak> selected = new ArrayList<>();
