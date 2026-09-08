@@ -1,0 +1,33 @@
+name: Apply Room ANC v0.6.2 patch
+on:
+  push:
+    branches: [ feature/room-anc-v062 ]
+    paths:
+      - 'tools/apply_room_v062_patch.py'
+      - '.github/workflows/apply-room-v062-patch.yml'
+permissions:
+  contents: write
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feature/room-anc-v062
+          fetch-depth: 0
+      - name: Apply Room ANC patch
+        run: python3 tools/apply_room_v062_patch.py
+      - name: Commit integrated Room runtime
+        run: |
+          git config user.name 'Ossendjiver'
+          git config user.email '39517879+Ossendjiver@users.noreply.github.com'
+          git add anclab/src/main/java/com/p38/anclab/profile/ProfileStore.java \
+                  anclab/src/main/java/com/p38/anclab/dsp/VehicleNarrowbandBank.java \
+                  anclab/src/main/java/com/p38/anclab/audio/AudioEngine.java \
+                  anclab/src/main/java/com/p38/anclab/MainActivity.java \
+                  anclab/src/main/java/com/p38/anclab/AncMediaService.java \
+                  anclab/build.gradle.kts \
+                  .github/workflows/build-anclab.yml
+          git diff --cached --check
+          git commit -m 'Add direct-feedback Room ANC profile'
+          git push origin HEAD:feature/room-anc-v062
