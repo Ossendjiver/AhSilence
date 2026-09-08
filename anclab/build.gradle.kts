@@ -10,8 +10,8 @@ android {
         applicationId = "com.p38.anclab"
         minSdk = 26
         targetSdk = 35
-        versionCode = 29
-        versionName = "0.6.11-120hz-physical-search-dev"
+        versionCode = 30
+        versionName = "0.6.12-fixed-tone-suite-dev"
     }
 
     signingConfigs {
