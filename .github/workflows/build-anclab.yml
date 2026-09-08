@@ -7,6 +7,7 @@ on:
       - feature/headphone-fxnlms-v05
       - feature/p38-dryrun-v058
       - feature/anc-lab-v059
+      - feature/multisensor-anc-v060
     paths:
       - 'anclab/**'
       - 'settings.gradle.kts'
@@ -62,7 +63,7 @@ jobs:
       - name: Upload ANC Lab APK
         uses: actions/upload-artifact@v4
         with:
-          name: ANC-Lab-v0.5.9.1-rebuild-debug
+          name: ANC-Lab-v0.6-multisensor-dev-debug
           path: anclab/build/outputs/apk/debug/anclab-debug.apk
           if-no-files-found: error
           retention-days: 14
