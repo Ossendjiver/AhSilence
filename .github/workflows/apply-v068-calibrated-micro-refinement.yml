@@ -1,0 +1,27 @@
+name: Apply ANC v0.6.8 calibrated micro-refinement patch
+on:
+  push:
+    branches: [ feature/room-anc-v062 ]
+    paths:
+      - 'tools/apply_v068_calibrated_micro_refinement.py'
+      - '.github/workflows/apply-v068-calibrated-micro-refinement.yml'
+permissions:
+  contents: write
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feature/room-anc-v062
+          fetch-depth: 0
+      - name: Apply calibrated micro-refinement patch
+        run: python3 tools/apply_v068_calibrated_micro_refinement.py
+      - name: Commit v0.6.8 update
+        run: |
+          git config user.name 'Ossendjiver'
+          git config user.email '39517879+Ossendjiver@users.noreply.github.com'
+          git add anclab
+          git diff --cached --check
+          git commit -m 'Add calibrated micro-refinement for narrowband ANC'
+          git push origin HEAD:feature/room-anc-v062
