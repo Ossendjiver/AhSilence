@@ -10,8 +10,8 @@ android {
         applicationId = "com.p38.anclab"
         minSdk = 26
         targetSdk = 35
-        versionCode = 21
-        versionName = "0.6.3-room-verified-feedback-dev"
+        versionCode = 22
+        versionName = "0.6.4-room-smoothed-verification-dev"
     }
 
     signingConfigs {

@@ -55,6 +55,11 @@ public final class VehicleNarrowbandBank {
     private static final int DIRECT_FEEDBACK_RECIPE_SUCCESS_UPDATES=4;
     private static final long DIRECT_FEEDBACK_RECIPE_SAVE_INTERVAL_MS=8000;
     private static final long DIRECT_FEEDBACK_AUDIT_RETRY_MS=60000;
+    private static final int ROOM_MAX_DISCOVERED_LANES=3;
+    private static final double ROOM_OWNERSHIP_RADIUS_HZ=8.0;
+    private static final long ROOM_DISCOVERY_INACTIVE_STALE_MS=15000;
+    private static final double ROOM_COEFFICIENT_SMOOTHING_SECONDS=0.180;
+    private static final double ROOM_FREQUENCY_SMOOTHING_SECONDS=0.350;
 
     private final ButterworthLowPass analysisLowPass=new ButterworthLowPass(SAMPLE_RATE,210.0);
     private final DcBlocker analysisDc=new DcBlocker(Math.exp(-2.0*Math.PI*3.0/SAMPLE_RATE));
@@ -169,7 +174,10 @@ public final class VehicleNarrowbandBank {
         for(Lane l:lanes)if(l.controllerEnabled)n++;return Math.max(1,n);
     }
     private synchronized void redistributeLimits(){double each=perLaneLimit();for(Lane l:lanes)l.controller.setMaximumGain(each);for(DiscoveredLane l:discovered)l.controller.setMaximumGain(each);}
-    private synchronized double perLaneLimit(){return Math.max(0.0001,totalCeiling*Math.max(0.02f,userScale)/effectiveLaneCount());}
+    private synchronized double perLaneLimit(){
+        int budgetLanes=directFeedbackLearning?ROOM_MAX_DISCOVERED_LANES:effectiveLaneCount();
+        return Math.max(0.0001,totalCeiling*Math.max(0.02f,userScale)/budgetLanes);
+    }
 
     /** Returns model-domain narrowband anti-noise for one 48 kHz microphone sample. */
     public float process(float microphone){
@@ -178,8 +186,10 @@ public final class VehicleNarrowbandBank {
         if(++decimator>=DECIMATION){decimator=0;ring[ringPos]=(float)filtered;if(++ringPos==ring.length)ringPos=0;if(ringCount<ring.length)ringCount++;totalAnalysisSamples++;if(++sinceAnalysis>=ANALYSIS_INTERVAL_SAMPLES){sinceAnalysis=0;analyze(System.currentTimeMillis());}}
 
         double value=0.0;
-        double coefficientSmoothing=1.0-Math.exp(-1.0/(SAMPLE_RATE*0.030));
-        double frequencySmoothing=1.0-Math.exp(-1.0/(SAMPLE_RATE*0.025));
+        double coefficientSeconds=directFeedbackLearning?ROOM_COEFFICIENT_SMOOTHING_SECONDS:0.030;
+        double frequencySeconds=directFeedbackLearning?ROOM_FREQUENCY_SMOOTHING_SECONDS:0.025;
+        double coefficientSmoothing=1.0-Math.exp(-1.0/(SAMPLE_RATE*coefficientSeconds));
+        double frequencySmoothing=1.0-Math.exp(-1.0/(SAMPLE_RATE*frequencySeconds));
         Lane[] telemetryLanes=lanes;
         for(Lane l:telemetryLanes){
             AutoController.Output o=l.controller.output();
@@ -390,7 +400,9 @@ public final class VehicleNarrowbandBank {
             }
             if(gain>1e-5)cancelling++;
 
-            if(gain<=1e-5&&now-l.lastStrongMs>DISCOVERY_INACTIVE_STALE_MS){
+            long inactiveStaleMs=directFeedbackLearning
+                    ?ROOM_DISCOVERY_INACTIVE_STALE_MS:DISCOVERY_INACTIVE_STALE_MS;
+            if(gain<=1e-5&&now-l.lastStrongMs>inactiveStaleMs){
                 l.controller.stop();iterator.remove();moved=true;changed=true;
             }
         }
@@ -404,6 +416,7 @@ public final class VehicleNarrowbandBank {
     }
 
     private int fallbackLaneLimit(){
+        if(directFeedbackLearning)return ROOM_MAX_DISCOVERED_LANES;
         return broadbandEnabled?MAX_DISCOVERED_LANES_BROADBAND:MAX_DISCOVERED_LANES_NARROWBAND_ONLY;
     }
 
@@ -443,7 +456,9 @@ public final class VehicleNarrowbandBank {
                 DiscoveredLane other=discovered.get(j);
                 double keepHz=keep.controller.output().frequencyHz();
                 double otherHz=other.controller.output().frequencyHz();
-                if(Math.abs(keepHz-otherHz)<DISCOVERY_COLLISION_RADIUS_HZ){
+                double collisionRadius=directFeedbackLearning
+                        ?ROOM_OWNERSHIP_RADIUS_HZ:DISCOVERY_COLLISION_RADIUS_HZ;
+                if(Math.abs(keepHz-otherHz)<=collisionRadius){
                     other.controller.stop();
                     discovered.remove(j);
                     merged=true;
@@ -515,8 +530,9 @@ public final class VehicleNarrowbandBank {
     }
 
     private boolean nearOwnedFrequency(double hz){
-        for(Lane l:lanes)if(l.available&&Math.abs(l.controller.output().frequencyHz()-hz)<DISCOVERY_DUPLICATE_RADIUS_HZ)return true;
-        for(DiscoveredLane l:discovered)if(Math.abs(l.controller.output().frequencyHz()-hz)<DISCOVERY_DUPLICATE_RADIUS_HZ)return true;
+        double radius=directFeedbackLearning?ROOM_OWNERSHIP_RADIUS_HZ:DISCOVERY_DUPLICATE_RADIUS_HZ;
+        for(Lane l:lanes)if(l.available&&Math.abs(l.controller.output().frequencyHz()-hz)<=radius)return true;
+        for(DiscoveredLane l:discovered)if(Math.abs(l.controller.output().frequencyHz()-hz)<=radius)return true;
         return false;
     }
 

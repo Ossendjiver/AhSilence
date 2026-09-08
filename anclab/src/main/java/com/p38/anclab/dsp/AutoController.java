@@ -22,8 +22,13 @@ public final class AutoController {
     private static final double CALIBRATION_RETUNE_HYSTERESIS_HZ = 0.55;
     private static final double RUNNING_VERIFY_HYSTERESIS_HZ = 0.20;
     private static final double ROOM_MIN_VERIFIED_REDUCTION_DB = 1.0;
-    private static final long ROOM_AUDIT_BASE_INTERVAL_MS = 4500L;
-    private static final long ROOM_AUDIT_SPREAD_MS = 2200L;
+    private static final long ROOM_AUDIT_BASE_INTERVAL_MS = 60000L;
+    private static final long ROOM_AUDIT_SPREAD_MS = 15000L;
+    private static final double ROOM_SOFT_AUDIT_SCALE = 0.35;
+    private static final double ROOM_SOFT_AUDIT_MIN_DELTA_DB = 0.35;
+    private static final double ROOM_VIRTUAL_VERIFY_MIN_DB = 0.45;
+    private static final int ROOM_VIRTUAL_VERIFY_FAILURE_WINDOWS = 12;
+    private static final double ROOM_VIRTUAL_VERIFY_SMOOTHING = 0.18;
 
     private Stage stage = Stage.IDLE;
     private long stageStartedMs;
@@ -56,6 +61,10 @@ public final class AutoController {
     private long lastAuditCompletedMs;
     private boolean activeVerificationPassed;
     private boolean activeVerificationFailed;
+    private double auditReducedScale;
+    private double auditRequiredReductionDb = ROOM_MIN_VERIFIED_REDUCTION_DB;
+    private double smoothedVirtualImprovementDb = Double.NaN;
+    private int virtualVerificationFailures;
 
     public synchronized void start(long nowMs, double maximumGain) {
         configure(nowMs, maximumGain, 34.5, false, "Dominant");
@@ -128,6 +137,10 @@ public final class AutoController {
         lastAuditCompletedMs = nowMs;
         activeVerificationPassed = false;
         activeVerificationFailed = false;
+        auditReducedScale = 0.0;
+        auditRequiredReductionDb = ROOM_MIN_VERIFIED_REDUCTION_DB;
+        smoothedVirtualImprovementDb = Double.NaN;
+        virtualVerificationFailures = 0;
     }
 
     public synchronized void stop() {
@@ -371,7 +384,8 @@ public final class AutoController {
         previousResidual = residual;
         previousCommand = command;
         if (directErrorLearning) {
-            beginRoomAudit(nowMs, "certifying cancellation against a muted baseline…");
+            beginRoomAudit(nowMs, "certifying cancellation against a muted baseline…",
+                    0.0, ROOM_MIN_VERIFIED_REDUCTION_DB);
             return;
         }
         stage = Stage.RUNNING;
@@ -380,10 +394,13 @@ public final class AutoController {
     }
 
     private void updateRunning(SpectrumSnapshot snapshot, long nowMs) {
-        if (directErrorLearning && activeVerificationPassed
-                && nowMs - lastAuditCompletedMs >= roomAuditIntervalMs()) {
-            beginRoomAudit(nowMs, "re-checking ANC on versus muted…");
-            return;
+        if (directErrorLearning && activeVerificationPassed) {
+            if (updateRoomVirtualVerification(snapshot, nowMs)) return;
+            if (nowMs - lastAuditCompletedMs >= roomAuditIntervalMs()) {
+                beginRoomAudit(nowMs, "gently re-checking full versus reduced ANC…",
+                        ROOM_SOFT_AUDIT_SCALE, ROOM_SOFT_AUDIT_MIN_DELTA_DB);
+                return;
+            }
         }
         if (!fixedTarget && elapsed(nowMs) >= settleMs()) {
             double drift = snapshot.peakFrequencyHz() - frequencyHz;
@@ -414,10 +431,10 @@ public final class AutoController {
             double innovation = Math.abs(residual - reference) / Math.max(reference, baselineResidual * 0.05);
             double agileWeight = clamp(innovation * 1.5, 0.0, 1.0);
             double stepSize = directErrorLearning
-                    ? 0.10 * (1.0 - agileWeight) + 0.28 * agileWeight
+                    ? 0.07 * (1.0 - agileWeight) + 0.16 * agileWeight
                     : 0.06 * (1.0 - agileWeight) + 0.20 * agileWeight;
             double normalization = secondaryPath.magnitudeSquared() + 1.0e-10;
-            double correctionLimit = maximumGain * (directErrorLearning ? 0.24 : 0.18);
+            double correctionLimit = maximumGain * (directErrorLearning ? 0.12 : 0.18);
             Complex gradient = secondaryPath.conjugate().multiply(error)
                     .multiply(-stepSize / normalization).clampMagnitude(correctionLimit);
             previousCommand = command;
@@ -501,9 +518,39 @@ public final class AutoController {
         status = String.format(Locale.US, "%s: tracking %.2f Hz", label, frequencyHz);
     }
 
-    private void beginRoomAudit(long nowMs, String message) {
+    private boolean updateRoomVirtualVerification(SpectrumSnapshot snapshot, long nowMs) {
+        if (!targetMatches(snapshot) || secondaryPath.magnitude() < 1.0e-5
+                || command.magnitude() < 1.0e-7) return false;
+        double virtualImprovement = estimatedFullImprovementDb(snapshot.targetComplex());
+        if (!Double.isFinite(virtualImprovement)) return false;
+        smoothedVirtualImprovementDb = Double.isFinite(smoothedVirtualImprovementDb)
+                ? smoothedVirtualImprovementDb * (1.0 - ROOM_VIRTUAL_VERIFY_SMOOTHING)
+                    + virtualImprovement * ROOM_VIRTUAL_VERIFY_SMOOTHING
+                : virtualImprovement;
+        currentImprovementDb = smoothedVirtualImprovementDb;
+        if (smoothedVirtualImprovementDb >= ROOM_VIRTUAL_VERIFY_MIN_DB) {
+            virtualVerificationFailures = Math.max(0, virtualVerificationFailures - 2);
+            return false;
+        }
+        if (++virtualVerificationFailures < ROOM_VIRTUAL_VERIFY_FAILURE_WINDOWS) return false;
+        virtualVerificationFailures = 0;
+        beginRoomAudit(nowMs, "predicted benefit weakened; checking at reduced strength…",
+                ROOM_SOFT_AUDIT_SCALE, ROOM_SOFT_AUDIT_MIN_DELTA_DB);
+        return true;
+    }
+
+    private double estimatedFullImprovementDb(Complex residual) {
+        Complex estimatedOff = residual.subtract(secondaryPath.multiply(command));
+        return 20.0 * Math.log10(Math.max(estimatedOff.magnitude(), 1.0e-9)
+                / Math.max(residual.magnitude(), 1.0e-9));
+    }
+
+    private void beginRoomAudit(long nowMs, String message,
+                                double reducedScale, double requiredReductionDb) {
         auditCommand = command;
-        command = Complex.ZERO;
+        auditReducedScale = clamp(reducedScale, 0.0, 0.95);
+        auditRequiredReductionDb = Math.max(0.05, requiredReductionDb);
+        command = auditCommand.multiply(auditReducedScale);
         auditOffResidual = Complex.ZERO;
         stage = Stage.AUDIT_OFF;
         stageStartedMs = nowMs;
@@ -511,7 +558,7 @@ public final class AutoController {
     }
 
     private void updateAuditOff(SpectrumSnapshot snapshot, long nowMs) {
-        command = Complex.ZERO;
+        command = auditCommand.multiply(auditReducedScale);
         if (elapsed(nowMs) < settleMs() || !targetMatches(snapshot)) return;
         auditOffResidual = snapshot.targetComplex();
         baseline = auditOffResidual;
@@ -530,23 +577,30 @@ public final class AutoController {
     private void updateAuditOn(SpectrumSnapshot snapshot, long nowMs) {
         if (elapsed(nowMs) < settleMs() || !targetMatches(snapshot)) return;
         double onResidual = snapshot.targetComplex().magnitude();
-        double improvement = 20.0 * Math.log10(Math.max(baselineResidual, 1.0e-9)
+        double measuredDelta = 20.0 * Math.log10(Math.max(baselineResidual, 1.0e-9)
                 / Math.max(onResidual, 1.0e-9));
-        if (!Double.isFinite(improvement) || improvement < ROOM_MIN_VERIFIED_REDUCTION_DB) {
+        if (!Double.isFinite(measuredDelta) || measuredDelta < auditRequiredReductionDb) {
             rejectActiveVerification(String.format(Locale.US,
-                    "muted A/B check found only %.1f dB reduction", improvement));
+                    "%s A/B check found only %.1f dB benefit",
+                    auditReducedScale <= 0.01 ? "muted" : "reduced-strength", measuredDelta));
             return;
         }
+        double virtualImprovement = estimatedFullImprovementDb(snapshot.targetComplex());
         activeVerificationPassed = true;
         activeVerificationFailed = false;
         previousCommand = command;
         previousResidual = onResidual;
-        currentImprovementDb = improvement;
+        currentImprovementDb = Double.isFinite(virtualImprovement)
+                ? Math.max(measuredDelta, virtualImprovement) : measuredDelta;
+        smoothedVirtualImprovementDb = currentImprovementDb;
+        virtualVerificationFailures = 0;
         lastAuditCompletedMs = nowMs;
         stage = Stage.RUNNING;
         stageStartedMs = nowMs;
         status = String.format(Locale.US,
-                "%s %.2f Hz · %.1f dB verified on/off reduction", label, frequencyHz, improvement);
+                "%s %.2f Hz · %.1f dB verified %s benefit",
+                label, frequencyHz, measuredDelta,
+                auditReducedScale <= 0.01 ? "on/off" : "full/reduced");
     }
 
     private void rejectActiveVerification(String reason) {
@@ -555,6 +609,8 @@ public final class AutoController {
         activeVerificationPassed = false;
         activeVerificationFailed = true;
         currentImprovementDb = Double.NaN;
+        smoothedVirtualImprovementDb = Double.NaN;
+        virtualVerificationFailures = 0;
         stage = Stage.IDLE;
         status = label + ": " + reason + "; muted and quarantined";
     }
