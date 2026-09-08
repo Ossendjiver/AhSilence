@@ -1,9 +1,9 @@
-name: Apply Room ANC v0.6.3 effectiveness and UI patch
+name: Apply Room ANC v0.6.4 smooth verification patch
 on:
   push:
     branches: [ feature/room-anc-v062 ]
     paths:
-      - 'tools/apply_room_v063_effectiveness_ui.py'
+      - 'tools/apply_room_v064_smooth_verification.py'
       - '.github/workflows/apply-room-v062-patch.yml'
 permissions:
   contents: write
@@ -15,13 +15,13 @@ jobs:
         with:
           ref: feature/room-anc-v062
           fetch-depth: 0
-      - name: Apply Room effectiveness verification and profile UI
-        run: python3 tools/apply_room_v063_effectiveness_ui.py
-      - name: Commit Room v0.6.3 update
+      - name: Apply Room smooth verification and lane stability patch
+        run: python3 tools/apply_room_v064_smooth_verification.py
+      - name: Commit Room v0.6.4 update
         run: |
           git config user.name 'Ossendjiver'
           git config user.email '39517879+Ossendjiver@users.noreply.github.com'
           git add anclab
           git diff --cached --check
-          git commit -m 'Verify Room ANC effectiveness and reorganize profile settings'
+          git commit -m 'Smooth Room ANC verification and lane ownership'
           git push origin HEAD:feature/room-anc-v062
