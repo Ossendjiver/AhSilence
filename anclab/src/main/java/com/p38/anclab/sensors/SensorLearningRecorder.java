@@ -7,8 +7,9 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 /**
- * Persists timestamped sensor observations as an independent learning stream. Hardware adapters only
- * need to publish to SensorDataBus; legacy ANC remains fully operational if no samples ever arrive.
+ * Persists sensor observations as an independent learning stream. Android receive time and the
+ * original external sample counter are both retained so later training can separate USB scheduling
+ * jitter from genuine mechanical/acoustic timing. Legacy ANC remains operational with no sensors.
  */
 public final class SensorLearningRecorder implements SensorDataBus.Listener {
     private final AncStorage storage;
@@ -23,10 +24,10 @@ public final class SensorLearningRecorder implements SensorDataBus.Listener {
     @Override public void onSensorSample(String sensorId,SensorDataBus.Sample sample){
         if(!enabled||sample==null||!storage.isConnected())return;
         String profile=profileId;
-        String line=String.format(Locale.US,"%d,%s,%.9f,%.9f,%.9f\n",sample.timestampNs(),csv(sensorId),sample.x(),sample.y(),sample.z());
+        String line=String.format(Locale.US,"%d,%d,%s,%s,%.9f,%.9f,%.9f\n",sample.timestampNs(),sample.sourceSampleIndex(),csv(sample.clockDomain()),csv(sensorId),sample.x(),sample.y(),sample.z());
         writer.execute(()->{
             String path="logs/sensors-"+profile+".csv";
-            if(!storage.exists(path))storage.appendText(path,"timestamp_ns,sensor_id,x,y,z\n");
+            if(!storage.exists(path))storage.appendText(path,"android_receive_ns,source_sample_index,clock_domain,sensor_id,x,y,z\n");
             storage.appendText(path,line);
         });
     }
