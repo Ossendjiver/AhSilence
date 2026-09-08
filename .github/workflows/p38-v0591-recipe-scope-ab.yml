@@ -1,0 +1,66 @@
+name: P38 v0.5.9.1 recipe scope A/B
+
+on:
+  push:
+    branches:
+      - test/p38-v059-section-replay
+    paths:
+      - '.github/workflows/p38-v0591-recipe-scope-ab.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  replay:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '21'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Download P38 WAV
+        run: |
+          pip install gdown
+          gdown 1NiNG6CORVcKrDd9YZGPVpkCqsQUewG6J -O P38.wav
+      - name: Prepare current and exact-bin recipe variants
+        run: |
+          mkdir -p current-src/com/p38/anclab/dsp exact-src/com/p38/anclab/dsp current-classes exact-classes results
+          sed 's/System\.currentTimeMillis()/replay.ReplayClock.nowMs()/g' anclab/src/main/java/com/p38/anclab/dsp/VehicleNarrowbandBank.java > current-src/com/p38/anclab/dsp/VehicleNarrowbandBank.java
+          python - <<'PY'
+          from pathlib import Path
+          p=Path('current-src/com/p38/anclab/dsp/VehicleNarrowbandBank.java'); s=p.read_text()
+          old='''                DiscoveredLane replace=null;\n                if(discovered.size()>=fallbackLaneLimit())replace=findReplaceableLane(candidate,now);\n                if(discovered.size()>=fallbackLaneLimit()&&replace==null)continue;'''
+          new='''                DiscoveredLane replace=null;\n                int controllerSlots=discoveredControllerSlotCount();\n                boolean candidateCancellable=FrequencyLanePolicy.cancellable(candidate.frequencyHz(),\n                        cancellationMinimumHz,cancellationMaximumHz);\n                if(candidateCancellable&&controllerSlots>=fallbackLaneLimit())replace=findReplaceableLane(candidate,now);\n                if(candidateCancellable&&controllerSlots>=fallbackLaneLimit()&&replace==null)continue;'''
+          s=s.replace(old,new,1)
+          marker='''    private int fallbackLaneLimit(){\n        return broadbandEnabled?MAX_DISCOVERED_LANES_BROADBAND:MAX_DISCOVERED_LANES_NARROWBAND_ONLY;\n    }\n'''
+          helper=marker+'''\n    private int discoveredControllerSlotCount(){ int count=0; for(DiscoveredLane lane:discovered)if(lane.cancellable)count++; return count; }\n'''
+          p.write_text(s.replace(marker,helper,1))
+          q=Path('exact-src/com/p38/anclab/dsp/VehicleNarrowbandBank.java'); q.write_text(p.read_text())
+          rb=Path('anclab/src/main/java/com/p38/anclab/dsp/VehicleRecipeBook.java').read_text()
+          needle='''        if (usable(exact, frequencyHz)) return exact;\n        VehicleCancellationRecipe best = null;'''
+          repl='''        if (usable(exact, frequencyHz)) return exact;\n        if ("discovered".equals(modelId)) return null;\n        VehicleCancellationRecipe best = null;'''
+          if needle not in rb: raise SystemExit('recipe fallback marker not found')
+          Path('exact-src/com/p38/anclab/dsp/VehicleRecipeBook.java').write_text(rb.replace(needle,repl,1))
+          PY
+      - name: Compile both variants
+        run: |
+          COMMON="tools/replaystubs/com/p38/anclab/profile/MechanicalFrequency.java tools/replaystubs/com/p38/anclab/telemetry/VehicleTelemetryRuntime.java anclab/src/main/java/com/p38/anclab/profile/VehicleCancellationRecipe.java anclab/src/main/java/com/p38/anclab/dsp/Complex.java anclab/src/main/java/com/p38/anclab/dsp/SpectrumSnapshot.java anclab/src/main/java/com/p38/anclab/dsp/Radix2Spectrum.java anclab/src/main/java/com/p38/anclab/dsp/SpectrumAnalyzer.java anclab/src/main/java/com/p38/anclab/dsp/AdaptiveFrequencyTracker.java anclab/src/main/java/com/p38/anclab/dsp/AutoController.java anclab/src/main/java/com/p38/anclab/dsp/ButterworthLowPass.java anclab/src/main/java/com/p38/anclab/dsp/DcBlocker.java anclab/src/main/java/com/p38/anclab/dsp/FrequencyLanePolicy.java anclab/src/main/java/com/p38/anclab/dsp/BroadbandDetector.java anclab/src/main/java/com/p38/anclab/dsp/VehicleLaneRegistry.java tools/replay/ReplayClock.java tools/replay/P38MultiSectionReplay.java"
+          javac -d current-classes $COMMON anclab/src/main/java/com/p38/anclab/dsp/VehicleRecipeBook.java current-src/com/p38/anclab/dsp/VehicleNarrowbandBank.java
+          javac -d exact-classes $COMMON exact-src/com/p38/anclab/dsp/VehicleRecipeBook.java exact-src/com/p38/anclab/dsp/VehicleNarrowbandBank.java
+      - name: Replay current recipe fallback
+        run: |
+          java -cp current-classes replay.P38MultiSectionReplay P38.wav results/current.csv 600-780
+          cat results/current.csv
+      - name: Replay exact-bin-only discovered recipes
+        run: |
+          java -cp exact-classes replay.P38MultiSectionReplay P38.wav results/exact.csv 600-780
+          cat results/exact.csv
+      - uses: actions/upload-artifact@v4
+        with:
+          name: P38-v0591-recipe-scope-AB
+          path: results/**
+          retention-days: 14
