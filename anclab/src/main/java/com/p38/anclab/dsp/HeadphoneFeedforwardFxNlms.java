@@ -22,6 +22,7 @@ public final class HeadphoneFeedforwardFxNlms {
     private final HeadphoneBandLimiter filteredXPathLowPass=new HeadphoneBandLimiter(SAMPLE_RATE,false);
     private final HeadphoneBandLimiter filteredXObservationBand=new HeadphoneBandLimiter(SAMPLE_RATE,true);
     private final PredictableFrequencyDiscovery predictableDiscovery=new PredictableFrequencyDiscovery(15.0,600.0);
+    private final PredictableFrequencyExcluder ownedToneExcluder=new PredictableFrequencyExcluder(SAMPLE_RATE,new double[0]);
 
     private final float[] predictorWeights=new float[PREDICTOR_TAPS];
     private final float[] referenceHistory;
@@ -79,24 +80,27 @@ public final class HeadphoneFeedforwardFxNlms {
     public void setPredictorAdaptationRate(float v){predictorMu=clamp(v,0f,0.25f);}
     public void setUserOutputScale(float v){userOutputScale=clamp(v,0f,1f);}
     public void setRouteGainCompensation(float v){routeGainCompensation=clamp(v,0f,4f);}
+    public void setExcludedFrequencies(double[] frequenciesHz){ownedToneExcluder.setFrequencies(frequenciesHz);}
     public void notifyRouteGainChanged(){safetyHoldSamples=Math.max(safetyHoldSamples,(int)(0.35f*SAMPLE_RATE));safetyStatus="Media volume changed · ANC briefly ramped down";}
 
     /** Vehicle-derived stable-line discovery is observational only until a dedicated tone layer owns it. */
     public double[] discoveredPredictableFrequenciesHz(){return predictableDiscovery.frequenciesHz();}
+    public String predictableFrequencySummary(){return predictableDiscovery.summary();}
 
     public void emergencyMuteAndReset(String reason){
         Arrays.fill(predictorWeights,0f);Arrays.fill(referenceHistory,0f);Arrays.fill(predictedHistory,0f);
         Arrays.fill(filteredPredictedHistory,0f);Arrays.fill(driveHistory,0f);Arrays.fill(predictorPathHistory,0f);
         predictorErrorPower=signalPower=1e-8f;confidence=confidenceSmooth=0f;runawayCounter=0;predictableDiscovery.reset();
-        seedControllerFromSecondaryPath();referenceBand.reset();outputLowPass.reset();secondaryObservationBand.reset();filteredXPathLowPass.reset();filteredXObservationBand.reset();
+        seedControllerFromSecondaryPath();referenceBand.reset();ownedToneExcluder.reset();outputLowPass.reset();secondaryObservationBand.reset();filteredXPathLowPass.reset();filteredXObservationBand.reset();
         safetyRamp=0f;safetyHoldSamples=(int)(1.5f*SAMPLE_RATE);safetyTrips++;
         safetyStatus="Safety rollback · "+reason;
     }
 
     public float process(float referenceMic){
         lastRawReference=referenceMic;
-        float x=referenceBand.process(referenceMic);
-        predictableDiscovery.observe(x,System.currentTimeMillis());
+        float observed=referenceBand.process(referenceMic);
+        predictableDiscovery.observe(observed);
+        float x=ownedToneExcluder.process(observed);
         referenceHistory[referencePos]=x;samplesSeen++;
 
         boolean adaptationAllowed=safetyHoldSamples<=0&&safetyRamp>0.95f;

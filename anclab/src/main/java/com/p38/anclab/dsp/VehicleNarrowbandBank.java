@@ -41,7 +41,8 @@ public final class VehicleNarrowbandBank {
     private static final int DISCOVERY_SCAN_EVERY_ANALYSES=5; // ~2 scans/s
     private static final int MAX_DISCOVERED_LANES_BROADBAND=6;
     private static final int MAX_DISCOVERED_LANES_NARROWBAND_ONLY=10;
-    private static final double DISCOVERY_ADMISSION_FLOOR_DBFS=-62.0;
+    private static final double DISCOVERY_ADMISSION_FLOOR_DBFS=-110.0;
+    private static final double DISCOVERY_MIN_PROMINENCE_DB=8.0;
     private static final double DISCOVERY_REPLACEMENT_MARGIN_DB=6.0;
     private static final double DISCOVERY_SEARCH_HALF_WIDTH_HZ=0.85;
     private static final double DISCOVERY_TRACK_HALF_WIDTH_HZ=0.70;
@@ -313,9 +314,9 @@ public final class VehicleNarrowbandBank {
             List<SpectrumAnalyzer.DetectedTone> peaks=SpectrumAnalyzer.findPeaks(window,first,ANALYSIS_RATE,
                     8.0,200.0,12,DISCOVERY_MIN_SEPARATION_HZ);
             List<BroadbandDetector.Candidate> ready=new ArrayList<>(discoveryDetector.update(peaks,now));
-            ready.sort(Comparator.comparingDouble(BroadbandDetector.Candidate::dbFs).reversed());
+            ready.sort(Comparator.comparingDouble(BroadbandDetector.Candidate::score).reversed());
             for(BroadbandDetector.Candidate candidate:ready){
-                if(candidate.dbFs()<DISCOVERY_ADMISSION_FLOOR_DBFS)continue;
+                if(candidate.dbFs()<DISCOVERY_ADMISSION_FLOOR_DBFS||candidate.prominenceDb()<DISCOVERY_MIN_PROMINENCE_DB)continue;
                 if(nearOwnedFrequency(candidate.frequencyHz()))continue;
                 DiscoveredLane replace=null;
                 int controllerSlots=discoveredControllerSlotCount();
@@ -344,7 +345,7 @@ public final class VehicleNarrowbandBank {
             SpectrumSnapshot search=SpectrumAnalyzer.analyze(window,first,ANALYSIS_RATE,
                     Math.max(8.0,centre-DISCOVERY_SEARCH_HALF_WIDTH_HZ),
                     Math.min(200.0,centre+DISCOVERY_SEARCH_HALF_WIDTH_HZ),centre,l.referenceEpoch,l.referencePhase);
-            boolean lock=search.peakDbFs()>-76.0&&search.contrastDb()>2.0&&Math.abs(search.peakFrequencyHz()-centre)<=DISCOVERY_SEARCH_HALF_WIDTH_HZ;
+            boolean lock=search.peakDbFs()>-112.0&&search.contrastDb()>1.5&&Math.abs(search.peakFrequencyHz()-centre)<=DISCOVERY_SEARCH_HALF_WIDTH_HZ;
             double refined=centre;
             if(lock){
                 refined=l.tracker.update(search.peakFrequencyHz(),now);

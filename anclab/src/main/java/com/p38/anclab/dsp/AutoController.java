@@ -97,7 +97,7 @@ public final class AutoController {
     private void configure(long nowMs, double maximumGain, double frequencyHz,
                            boolean fixedTarget, String label) {
         this.maximumGain = clamp(maximumGain, 0.0001, 0.15);
-        this.frequencyHz = clamp(frequencyHz, 8.0, 200.0);
+        this.frequencyHz = clamp(frequencyHz, 8.0, 600.0);
         this.fixedTarget = fixedTarget;
         this.label = label;
         stageStartedMs = nowMs;
@@ -135,7 +135,7 @@ public final class AutoController {
      * verification state.
      */
     public synchronized void followFrequency(double requestedHz, long nowMs) {
-        requestedHz = clamp(requestedHz, 8.0, 200.0);
+        requestedHz = clamp(requestedHz, 8.0, 600.0);
         double delta = requestedHz - frequencyHz;
         double distance = Math.abs(delta);
         if (distance < FOLLOW_DEADBAND_HZ) return;
