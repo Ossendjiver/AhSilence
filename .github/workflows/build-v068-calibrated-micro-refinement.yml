@@ -21,7 +21,9 @@ jobs:
           java-version: '17'
       - uses: gradle/actions/setup-gradle@v4
       - name: Test and assemble
-        run: ./gradlew :anclab:clean :anclab:testDebugUnitTest :anclab:assembleDebug --stacktrace
+        run: |
+          chmod +x gradlew
+          ./gradlew :anclab:clean :anclab:testDebugUnitTest :anclab:assembleDebug --stacktrace
       - name: Upload debug APK
         uses: actions/upload-artifact@v4
         with:
