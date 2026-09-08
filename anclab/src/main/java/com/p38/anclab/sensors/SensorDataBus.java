@@ -7,12 +7,13 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * Thread-safe handoff point for present/future hardware adapters. Timestamps are monotonic
- * nanoseconds at acquisition. Current ANC can run with this bus empty; listeners let independent
- * legacy learning/logging observe sensor data without making the sensors a runtime dependency.
+ * Thread-safe handoff point for present/future hardware adapters. RP2040 adapters should publish the
+ * original source sample index and clock domain as well as Android receive time. That preserves
+ * synchronous timing through USB/buffering even when the phone delivers packets irregularly.
+ * Current ANC can run with this bus empty.
  */
 public final class SensorDataBus {
-    public record Sample(long timestampNs,float x,float y,float z){}
+    public record Sample(long timestampNs,long sourceSampleIndex,String clockDomain,float x,float y,float z){}
     public interface Listener { void onSensorSample(String sensorId,Sample sample); }
     private static final SensorDataBus INSTANCE=new SensorDataBus();
     private final Map<String,Sample> latest=new HashMap<>();
@@ -20,11 +21,14 @@ public final class SensorDataBus {
     private SensorDataBus(){}
     public static SensorDataBus get(){return INSTANCE;}
 
-    public void publish(String sensorId,long timestampNs,float x,float y,float z){
+    /** Compatibility path for Android-local sensors that have no external source clock. */
+    public void publish(String sensorId,long timestampNs,float x,float y,float z){publish(sensorId,timestampNs,-1L,"android-monotonic",x,y,z);}
+
+    /** Preferred path for RP2040 frames. timestampNs is Android receive time, sourceSampleIndex is authoritative for relative input timing. */
+    public void publish(String sensorId,long timestampNs,long sourceSampleIndex,String clockDomain,float x,float y,float z){
         if(sensorId==null||sensorId.isBlank())return;
-        Sample sample=new Sample(timestampNs,x,y,z);List<Listener> copy;
+        Sample sample=new Sample(timestampNs,sourceSampleIndex,clockDomain==null?"":clockDomain,x,y,z);List<Listener> copy;
         synchronized(this){latest.put(sensorId,sample);copy=new ArrayList<>(listeners);}
-        // Call outside the bus lock so storage/learning listeners never stall other publishers.
         for(Listener l:copy)try{l.onSensorSample(sensorId,sample);}catch(RuntimeException ignored){}
     }
     public synchronized void addListener(Listener l){if(l!=null&&!listeners.contains(l))listeners.add(l);}
