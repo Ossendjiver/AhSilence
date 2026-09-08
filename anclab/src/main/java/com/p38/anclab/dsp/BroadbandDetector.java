@@ -29,11 +29,16 @@ public final class BroadbandDetector {
                     best = track; bestDistance = distance;
                 }
             }
-            if (best == null) { best = new Track(detection.frequencyHz(), nowMs); tracks.add(best); }
+            if (best == null) {
+                best = new Track(detection.frequencyHz(), nowMs);
+                best.dbFs=detection.dbFs();best.localFloorDbFs=detection.localFloorDbFs();best.prominenceDb=detection.prominenceDb();
+                tracks.add(best);
+            } else {
+                best.dbFs = 0.75*best.dbFs+0.25*detection.dbFs();
+                best.localFloorDbFs=0.75*best.localFloorDbFs+0.25*detection.localFloorDbFs();
+                best.prominenceDb=0.75*best.prominenceDb+0.25*detection.prominenceDb();
+            }
             best.frequencyHz = best.tracker.update(detection.frequencyHz(), nowMs);
-            best.dbFs = 0.75*best.dbFs+0.25*detection.dbFs();
-            best.localFloorDbFs=0.75*best.localFloorDbFs+0.25*detection.localFloorDbFs();
-            best.prominenceDb=0.75*best.prominenceDb+0.25*detection.prominenceDb();
             best.confirmations++;
             best.lastSeenMs = nowMs;
             best.seenThisScan = true;
@@ -59,9 +64,9 @@ public final class BroadbandDetector {
         final AdaptiveFrequencyTracker tracker = new AdaptiveFrequencyTracker();
         long lastSeenMs;
         double frequencyHz;
-        double dbFs=-120.0;
-        double localFloorDbFs=-120.0;
-        double prominenceDb=0.0;
+        double dbFs;
+        double localFloorDbFs;
+        double prominenceDb;
         int confirmations;
         boolean seenThisScan;
         Track(double frequencyHz, long nowMs) {
