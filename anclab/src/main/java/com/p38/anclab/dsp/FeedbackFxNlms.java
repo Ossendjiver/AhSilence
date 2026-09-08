@@ -16,7 +16,10 @@ public final class FeedbackFxNlms {
     public static final int CONTROLLER_TAPS=128;
     private static final int SAMPLE_RATE=48000;
     private static final float WEIGHT_LIMIT=32f;
-    private static final float BROADBAND_SHARE=0.25f; // residual experiment never owns the whole ANC ceiling
+    private static final float BROADBAND_SHARE=0.25f;
+    private static final int EFFECT_WINDOW_SAMPLES=SAMPLE_RATE;
+    private static final double MIN_EFFECTIVE_IMPROVEMENT_DB=0.15;
+    private static final int MAX_INEFFECTIVE_WINDOWS=3;
 
     private final int taps;
     private final float[] w,xHist,xfHist,s,yDelay,refDelay;
@@ -42,6 +45,10 @@ public final class FeedbackFxNlms {
     private volatile String safetyStatus="";
     private float inRms=0f,outRms=0f,modelOutRms=0f;
 
+    private double effectBaselineEnergy=0.0,effectResidualEnergy=0.0;
+    private int effectSamples=0,ineffectiveWindows=0;
+    private volatile double lastEffectivenessDb=Double.NaN;
+
     private volatile float lastReference=0f,lastPredictedCancellation=0f,lastExpectedResidual=0f;
     private volatile float lastMeasuredResidual=0f,lastControllerOutput=0f,lastModelDrive=0f;
 
@@ -58,14 +65,17 @@ public final class FeedbackFxNlms {
     public void setUserOutputScale(float v){userOutputScale=clamp(v,0f,1f)*BROADBAND_SHARE;}
     public void setRouteGainCompensation(float v){routeGainCompensation=clamp(v,0f,4f);}
     public void setExcludedFrequencies(double[] frequenciesHz){predictableExcluder.setFrequencies(frequenciesHz);}
-    public void notifyRouteGainChanged(){safetyHoldSamples=Math.max(safetyHoldSamples,(int)(0.35f*SAMPLE_RATE));safetyStatus="Media volume changed · vehicle broadband briefly ramped down";}
+    public void notifyRouteGainChanged(){safetyHoldSamples=Math.max(safetyHoldSamples,(int)(0.35f*SAMPLE_RATE));safetyStatus="Media volume changed · vehicle broadband briefly ramped down";resetEffectivenessWindow();}
 
     public void reset(){
         Arrays.fill(w,0f);Arrays.fill(xHist,0f);Arrays.fill(xfHist,0f);Arrays.fill(yDelay,0f);Arrays.fill(refDelay,0f);
         xPos=xfPos=yPos=refPos=0;inRms=outRms=modelOutRms=0f;runawayCounter=0;ceilingOccupancy=0f;
         errorBand.reset();secondaryObservationBand.reset();outputLowPass.reset();filteredXPathLowPass.reset();predictableExcluder.reset();
         lastReference=lastPredictedCancellation=lastExpectedResidual=lastMeasuredResidual=lastControllerOutput=lastModelDrive=0f;
+        ineffectiveWindows=0;lastEffectivenessDb=Double.NaN;resetEffectivenessWindow();
     }
+
+    private void resetEffectivenessWindow(){effectBaselineEnergy=effectResidualEnergy=0.0;effectSamples=0;}
 
     private void safetyTrip(String reason,boolean latch){
         int priorTrips=safetyTrips;
@@ -82,10 +92,6 @@ public final class FeedbackFxNlms {
             return 0f;
         }
 
-        // Model the loudspeaker return in the same 15-600 Hz observation path as the selected
-        // microphone. Only then reconstruct the disturbance and remove frequencies already owned
-        // by the narrowband bank. Notching measuredError before secondary-path subtraction mixes
-        // unlike signal domains and biases the feedback reference.
         float predictedCancellation=secondaryObservationBand.process(convolveDelayedOutput());
         float reconstructedDisturbance=error-predictedCancellation;
         float reference=predictableExcluder.process(reconstructedDisturbance);
@@ -114,14 +120,30 @@ public final class FeedbackFxNlms {
         boolean severe=currentModel>0.060f&&currentModel>4f*Math.max(currentIn,0.0001f);
         if((suspect||severe)&&safetyHoldSamples<=0)runawayCounter++;else runawayCounter=Math.max(0,runawayCounter-4);
 
-        // 2026-09-07 field WAV: broad command occupied ~70% of its hard rail and reinforced 61.5 Hz.
-        // The old input/output RMS-ratio guard could not see this because cabin noise was already loud.
-        float atRail=(modelCeiling>0.002f&&safetyRamp>0.95f&&Math.abs(modelDrive)>=0.90f*modelCeiling)?1f:0f;
+        // Rail monitoring must remain active even at very small user-selected broadband ceilings.
+        // The previous >0.002 guard created a blind spot at exactly the 10% test ceiling.
+        float atRail=(modelCeiling>1e-6f&&safetyRamp>0.95f&&Math.abs(modelDrive)>=0.90f*modelCeiling)?1f:0f;
         ceilingOccupancy=0.9995f*ceilingOccupancy+0.0005f*atRail;
         boolean pinned=ceilingOccupancy>0.45f&&safetyHoldSamples<=0;
 
+        // Effectiveness gate: compare the estimated no-cancellation disturbance to the measured
+        // residual. A controller that spends sustained time with meaningful output but produces
+        // less than 0.15 dB benefit is disabled instead of being allowed to sit on its rail.
+        if(safetyRamp>0.95f&&modelCeiling>1e-6f&&Math.abs(modelDrive)>0.20f*modelCeiling){
+            effectBaselineEnergy+=reconstructedDisturbance*(double)reconstructedDisturbance;
+            effectResidualEnergy+=error*(double)error;effectSamples++;
+            if(effectSamples>=EFFECT_WINDOW_SAMPLES){
+                lastEffectivenessDb=10.0*Math.log10(Math.max(effectBaselineEnergy,1e-18)/Math.max(effectResidualEnergy,1e-18));
+                if(lastEffectivenessDb<MIN_EFFECTIVE_IMPROVEMENT_DB)ineffectiveWindows++;else ineffectiveWindows=0;
+                resetEffectivenessWindow();
+            }
+        }else if(safetyHoldSamples>0){resetEffectivenessWindow();}
+
         if(pinned){
             safetyTrip("ceiling-pinned feedback signature",true);
+            modelDrive=transportDrive=predictedCancellation=0f;
+        }else if(ineffectiveWindows>=MAX_INEFFECTIVE_WINDOWS){
+            safetyTrip(String.format(java.util.Locale.US,"ineffective broadband (%.2f dB residual benefit)",lastEffectivenessDb),true);
             modelDrive=transportDrive=predictedCancellation=0f;
         }else if(runawayCounter>720){
             safetyTrip("vehicle broadband feedback/runaway signature",true);
@@ -139,6 +161,7 @@ public final class FeedbackFxNlms {
     public float outputRms(){return(float)Math.sqrt(Math.max(0f,outRms));}
     public float modelOutputRms(){return(float)Math.sqrt(Math.max(0f,modelOutRms));}
     public float ceilingOccupancy(){return ceilingOccupancy;}
+    public double effectivenessDb(){return lastEffectivenessDb;}
     public boolean isLatchedOff(){return latchedOff;}
     public int safetyTrips(){return safetyTrips;}
     public String safetyStatus(){return safetyStatus;}
