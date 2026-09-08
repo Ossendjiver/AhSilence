@@ -29,37 +29,31 @@ jobs:
         run: |
           pip install gdown
           gdown 1NiNG6CORVcKrDd9YZGPVpkCqsQUewG6J -O P38.wav
-      - name: Prepare production class with deterministic replay clock
+      - name: Prepare baseline and monitor-cap-fix production classes
         run: |
-          mkdir -p replay-src/com/p38/anclab/dsp replay-classes p38-v059-fast-results
+          mkdir -p baseline-src/com/p38/anclab/dsp fixed-src/com/p38/anclab/dsp baseline-classes fixed-classes p38-v059-fast-results
           sed 's/System\.currentTimeMillis()/replay.ReplayClock.nowMs()/g' \
             anclab/src/main/java/com/p38/anclab/dsp/VehicleNarrowbandBank.java \
-            > replay-src/com/p38/anclab/dsp/VehicleNarrowbandBank.java
-      - name: Compile production controller logic
+            > baseline-src/com/p38/anclab/dsp/VehicleNarrowbandBank.java
+          python - <<'PY'
+          from pathlib import Path
+          src=Path('baseline-src/com/p38/anclab/dsp/VehicleNarrowbandBank.java').read_text()
+          old='''                DiscoveredLane replace=null;\n                if(discovered.size()>=fallbackLaneLimit())replace=findReplaceableLane(candidate,now);\n                if(discovered.size()>=fallbackLaneLimit()&&replace==null)continue;'''
+          new='''                DiscoveredLane replace=null;\n                long controllerSlots=discovered.stream().filter(lane -> lane.cancellable).count();\n                boolean candidateCancellable=FrequencyLanePolicy.cancellable(candidate.frequencyHz(),cancellationMinimumHz,cancellationMaximumHz);\n                if(candidateCancellable&&controllerSlots>=fallbackLaneLimit())replace=findReplaceableLane(candidate,now);\n                if(candidateCancellable&&controllerSlots>=fallbackLaneLimit()&&replace==null)continue;'''
+          if old not in src: raise SystemExit('capacity block not found')
+          Path('fixed-src/com/p38/anclab/dsp/VehicleNarrowbandBank.java').write_text(src.replace(old,new))
+          PY
+      - name: Compile baseline and fixed production logic
         run: |
-          javac -d replay-classes \
-            tools/replaystubs/com/p38/anclab/profile/MechanicalFrequency.java \
-            tools/replaystubs/com/p38/anclab/telemetry/VehicleTelemetryRuntime.java \
-            anclab/src/main/java/com/p38/anclab/profile/VehicleCancellationRecipe.java \
-            anclab/src/main/java/com/p38/anclab/dsp/Complex.java \
-            anclab/src/main/java/com/p38/anclab/dsp/SpectrumSnapshot.java \
-            anclab/src/main/java/com/p38/anclab/dsp/Radix2Spectrum.java \
-            anclab/src/main/java/com/p38/anclab/dsp/SpectrumAnalyzer.java \
-            anclab/src/main/java/com/p38/anclab/dsp/AdaptiveFrequencyTracker.java \
-            anclab/src/main/java/com/p38/anclab/dsp/AutoController.java \
-            anclab/src/main/java/com/p38/anclab/dsp/ButterworthLowPass.java \
-            anclab/src/main/java/com/p38/anclab/dsp/DcBlocker.java \
-            anclab/src/main/java/com/p38/anclab/dsp/FrequencyLanePolicy.java \
-            anclab/src/main/java/com/p38/anclab/dsp/BroadbandDetector.java \
-            anclab/src/main/java/com/p38/anclab/dsp/VehicleRecipeBook.java \
-            anclab/src/main/java/com/p38/anclab/dsp/VehicleLaneRegistry.java \
-            tools/replay/ReplayClock.java \
-            replay-src/com/p38/anclab/dsp/VehicleNarrowbandBank.java \
-            tools/replay/P38SectionSyntheticClockReplay.java
-      - name: Replay real 20-200 s WAV section
-        run: java -cp replay-classes replay.P38SectionSyntheticClockReplay P38.wav p38-v059-fast-results/exact_logic_20_200.csv
+          COMMON="tools/replaystubs/com/p38/anclab/profile/MechanicalFrequency.java tools/replaystubs/com/p38/anclab/telemetry/VehicleTelemetryRuntime.java anclab/src/main/java/com/p38/anclab/profile/VehicleCancellationRecipe.java anclab/src/main/java/com/p38/anclab/dsp/Complex.java anclab/src/main/java/com/p38/anclab/dsp/SpectrumSnapshot.java anclab/src/main/java/com/p38/anclab/dsp/Radix2Spectrum.java anclab/src/main/java/com/p38/anclab/dsp/SpectrumAnalyzer.java anclab/src/main/java/com/p38/anclab/dsp/AdaptiveFrequencyTracker.java anclab/src/main/java/com/p38/anclab/dsp/AutoController.java anclab/src/main/java/com/p38/anclab/dsp/ButterworthLowPass.java anclab/src/main/java/com/p38/anclab/dsp/DcBlocker.java anclab/src/main/java/com/p38/anclab/dsp/FrequencyLanePolicy.java anclab/src/main/java/com/p38/anclab/dsp/BroadbandDetector.java anclab/src/main/java/com/p38/anclab/dsp/VehicleRecipeBook.java anclab/src/main/java/com/p38/anclab/dsp/VehicleLaneRegistry.java tools/replay/ReplayClock.java tools/replay/P38SectionSyntheticClockReplay.java"
+          javac -d baseline-classes $COMMON baseline-src/com/p38/anclab/dsp/VehicleNarrowbandBank.java
+          javac -d fixed-classes $COMMON fixed-src/com/p38/anclab/dsp/VehicleNarrowbandBank.java
+      - name: Replay baseline
+        run: java -cp baseline-classes replay.P38SectionSyntheticClockReplay P38.wav p38-v059-fast-results/baseline.csv
+      - name: Replay monitor-only-capacity fix
+        run: java -cp fixed-classes replay.P38SectionSyntheticClockReplay P38.wav p38-v059-fast-results/monitor_capacity_fix.csv
       - uses: actions/upload-artifact@v4
         with:
-          name: P38-v0.5.9-accelerated-section-replay
+          name: P38-v0.5.9-monitor-capacity-AB
           path: p38-v059-fast-results/**
           retention-days: 14
