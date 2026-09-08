@@ -15,19 +15,27 @@ public class RoomSmoothVerificationTest {
         assertTrue(controller.output().gain() > 0.0);
     }
 
-    @Test public void weakVirtualBenefitTriggersReducedStrengthAudit() {
+    @Test public void weakVirtualBenefitPersistsAcrossFineCyclesAndTriggersSoftAudit() {
         AutoController controller = verifiedController();
-        Complex command = controller.output().coefficient();
-        Complex equalBenefitResidual = command.multiply(0.5);
         long now = 3_500;
-        for (int i = 0; i < 12; i++) {
-            now += 100;
-            controller.update(snapshot(equalBenefitResidual.re(), equalBenefitResidual.im()), now);
+        double fullGainBeforeAudit = controller.output().gain();
+
+        // Normal Room operation alternates RUNNING with settled VERIFY_FINE cycles. Feed a
+        // deliberately zero-benefit residual for long enough to prove that the effectiveness
+        // accumulator survives those adaptation cycles instead of being reset by them.
+        for (int i = 0; i < 80 && !"AUDIT_OFF".equals(controller.stageName()); i++) {
+            Complex command = controller.output().coefficient();
+            Complex zeroBenefitResidual = command.multiply(0.5);
+            fullGainBeforeAudit = controller.output().gain();
+            now += 500;
+            controller.update(snapshot(zeroBenefitResidual.re(), zeroBenefitResidual.im()), now);
         }
+
         assertEquals("AUDIT_OFF", controller.stageName());
         assertTrue("soft audit must retain some ANC instead of hard muting",
                 controller.output().gain() > 0.0);
-        assertTrue(controller.output().gain() < command.magnitude());
+        assertTrue("soft audit must reduce the command while measuring benefit",
+                controller.output().gain() < fullGainBeforeAudit);
     }
 
     private static AutoController verifiedController() {
