@@ -4,6 +4,11 @@ on:
   push:
     branches:
       - test/p38-v059-section-replay
+    paths:
+      - 'tools/p38_v059_section_acquisition.py'
+      - 'tools/replay/P38SectionClosedLoopReplay.java'
+      - 'tools/replaystubs/**'
+      - '.github/workflows/p38-v059-section-replay.yml'
   workflow_dispatch:
 
 permissions:
@@ -51,8 +56,7 @@ jobs:
             anclab/src/main/java/com/p38/anclab/dsp/VehicleNarrowbandBank.java \
             tools/replay/P38SectionClosedLoopReplay.java
       - name: Run exact 20-200 s cold/warm synthetic-path replay
-        run: |
-          java -cp replay-classes replay.P38SectionClosedLoopReplay P38.wav p38-v059-section-results/exact_closed_loop_20_200.csv
+        run: java -cp replay-classes replay.P38SectionClosedLoopReplay P38.wav p38-v059-section-results/exact_closed_loop_20_200.csv
       - name: Upload replay outputs
         uses: actions/upload-artifact@v4
         with:
