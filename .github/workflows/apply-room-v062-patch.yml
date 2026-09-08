@@ -4,6 +4,7 @@ on:
     branches: [ feature/room-anc-v062 ]
     paths:
       - 'tools/apply_room_v065_calibrated_path.py'
+      - 'tools/run_room_v065_calibrated_path.py'
       - '.github/workflows/apply-room-v062-patch.yml'
 permissions:
   contents: write
@@ -16,7 +17,7 @@ jobs:
           ref: feature/room-anc-v062
           fetch-depth: 0
       - name: Apply Room calibrated-path and quiet-discovery patch
-        run: python3 tools/apply_room_v065_calibrated_path.py
+        run: python3 tools/run_room_v065_calibrated_path.py
       - name: Commit Room v0.6.5 update
         run: |
           git config user.name 'Ossendjiver'
