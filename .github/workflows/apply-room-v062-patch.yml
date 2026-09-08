@@ -21,7 +21,7 @@ jobs:
         run: |
           git config user.name 'Ossendjiver'
           git config user.email '39517879+Ossendjiver@users.noreply.github.com'
-          git add anclab .github/workflows/build-anclab.yml
+          git add anclab
           git diff --cached --check
           git commit -m 'Verify Room ANC effectiveness and reorganize profile settings'
           git push origin HEAD:feature/room-anc-v062
