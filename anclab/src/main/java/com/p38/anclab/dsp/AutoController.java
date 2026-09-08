@@ -40,7 +40,7 @@ public final class AutoController {
     private static final double CALIBRATED_REFINE_MAX_PATH_RATIO = 32.0;
     // Room oscillator coefficients are smoothed with a 180 ms time constant.  Wait long enough
     // that the entire 300 ms control phasor is effectively under the current command.
-    private static final long DIRECT_ERROR_SETTLE_MS = 850L;
+    private static final long DIRECT_ERROR_SETTLE_MS = 420L;
     private static final double INITIAL_VERIFICATION_SCALE = 0.25;
     private static final double INITIAL_VERIFICATION_MAX_GAIN = 0.0040;
     private static final double INITIAL_VERIFICATION_MIN_REDUCTION_DB = 0.30;
@@ -334,10 +334,11 @@ public final class AutoController {
                 rejectActiveVerification("could not start local calibrated-path measurement");
                 return;
             }
-            command = initialVerificationCommand();
+            command = baseline.negate().divide(secondaryPath)
+                    .clampMagnitude(maximumGain).multiply(0.5);
             stage = Stage.VERIFY_HALF;
             stageStartedMs = nowMs;
-            status = label + ": validating learned path at bounded initial strength…";
+            status = label + ": validating learned path at half strength…";
             return;
         }
         if (recipeCommand.magnitude() > 0) {
