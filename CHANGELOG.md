@@ -4,6 +4,16 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.9.1-rebuild] — 2026-09-08
+
+### Fixed
+- Keep 8–20 Hz microphone discoveries monitor-only without allowing them to consume the bounded fallback cancellation-controller bank.
+- Capacity and replacement decisions now count only cancellable discovered lanes; monitoring, logging, broadband exclusion visibility and existing output ceilings remain unchanged.
+
+### Validation basis
+- On the real P38 20–200 second WAV section with the same synthetic unity-gain 50 ms secondary path, true 33–36 Hz RUNNING time increased from 1.2 s to 17.5 s cold and from 0.0 s to 50.1 s warm in the isolated A/B.
+- Total true RUNNING lane-time increased from 351.9 s to 397.7 s cold and from 433.2 s to 495.5 s warm. These are controller-orchestration replay figures, not measured in-cabin attenuation.
+
 ## [0.5.9-rebuild] — 2026-09-08
 
 ### Changed

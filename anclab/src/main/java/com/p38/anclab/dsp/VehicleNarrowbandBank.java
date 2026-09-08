@@ -318,8 +318,11 @@ public final class VehicleNarrowbandBank {
                 if(candidate.dbFs()<DISCOVERY_ADMISSION_FLOOR_DBFS)continue;
                 if(nearOwnedFrequency(candidate.frequencyHz()))continue;
                 DiscoveredLane replace=null;
-                if(discovered.size()>=fallbackLaneLimit())replace=findReplaceableLane(candidate,now);
-                if(discovered.size()>=fallbackLaneLimit()&&replace==null)continue;
+                int controllerSlots=discoveredControllerSlotCount();
+                boolean candidateCancellable=FrequencyLanePolicy.cancellable(candidate.frequencyHz(),
+                        cancellationMinimumHz,cancellationMaximumHz);
+                if(candidateCancellable&&controllerSlots>=fallbackLaneLimit())replace=findReplaceableLane(candidate,now);
+                if(candidateCancellable&&controllerSlots>=fallbackLaneLimit()&&replace==null)continue;
                 if(replace!=null){replace.controller.stop();discovered.remove(replace);}
                 DiscoveredLane lane=new DiscoveredLane(candidate.id(),candidate.frequencyHz(),now);
                 lane.lastPeakDbFs=candidate.dbFs();
@@ -380,6 +383,13 @@ public final class VehicleNarrowbandBank {
 
     private int fallbackLaneLimit(){
         return broadbandEnabled?MAX_DISCOVERED_LANES_BROADBAND:MAX_DISCOVERED_LANES_NARROWBAND_ONLY;
+    }
+
+    /** Monitor-only discoveries stay visible but do not consume cancellation-controller capacity. */
+    private int discoveredControllerSlotCount(){
+        int count=0;
+        for(DiscoveredLane lane:discovered)if(lane.cancellable)count++;
+        return count;
     }
 
     private DiscoveredLane findReplaceableLane(BroadbandDetector.Candidate candidate,long now){
