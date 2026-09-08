@@ -48,7 +48,7 @@ public final class MainActivity extends Activity {
     private AncRuntime rt;
     private ProfileStore profiles;
     private ScrollView controlPage,splPage,settingsPage;
-    private Button controlTab,splTab,settingsTab,startButton,recordButton,calibrateButton,useStoredButton,graphButton;
+    private Button controlTab,splTab,settingsTab,startButton,recordButton,calibrateButton,useStoredButton,graphButton,toneLabButton;
     private TextView storageText,calibrationText,runtimeText,profileWarning,recordingText,antiNoiseText,broadbandText,laneCountText,laneListText;
     private Spinner profileSpinner,inputSpinner,outputSpinner,settingsInputSpinner,settingsOutputSpinner;
     private CheckBox positionCheck,monitorLogCheck,broadbandCheck;
@@ -81,7 +81,7 @@ public final class MainActivity extends Activity {
 
         root.addView(section("ANTI-NOISE LIMIT"));LinearLayout gain=card(CARD,Color.TRANSPARENT);antiNoiseText=text("50% total allowed anti-noise",14,TEXT);antiNoiseText.setTypeface(Typeface.DEFAULT,Typeface.BOLD);gain.addView(antiNoiseText);antiNoiseSeek=new SeekBar(this);antiNoiseSeek.setMax(100);antiNoiseSeek.setProgress(50);antiNoiseSeek.setProgressTintList(ColorStateList.valueOf(CYAN));gain.addView(antiNoiseSeek,matchWrap());gain.addView(infoIcon("Anti-noise limit","Hard ceiling for generated anti-noise. Android media-volume changes are compensated separately so raising music volume should not raise acoustic ANC level."),topSpaced());root.addView(gain,spaced());
 
-        root.addView(section("ANC CONTROL"));LinearLayout control=card(CARD,Color.TRANSPARENT);profileWarning=text("",12,AMBER);control.addView(profileWarning);broadbandCheck=check("SPECULATIVE BROADBAND ANC",false);control.addView(broadbandCheck,topSpaced());broadbandText=text("ⓘ",18,CYAN);broadbandText.setOnClickListener(v->showInfo("Broadband ANC",String.valueOf(v.getTag())));control.addView(broadbandText,topSpaced());startButton=primaryButton("START ANC");startButton.setOnClickListener(v->toggleAnc());control.addView(startButton,topSpaced());graphButton=secondaryButton("OPEN LIVE WAVE GRAPH");graphButton.setOnClickListener(v->startActivity(new Intent(this,GraphActivity.class)));control.addView(graphButton,topSpaced());root.addView(control,spaced());
+        root.addView(section("ANC CONTROL"));LinearLayout control=card(CARD,Color.TRANSPARENT);profileWarning=text("",12,AMBER);control.addView(profileWarning);broadbandCheck=check("SPECULATIVE BROADBAND ANC",false);control.addView(broadbandCheck,topSpaced());broadbandText=text("ⓘ",18,CYAN);broadbandText.setOnClickListener(v->showInfo("Broadband ANC",String.valueOf(v.getTag())));control.addView(broadbandText,topSpaced());startButton=primaryButton("START ANC");startButton.setOnClickListener(v->toggleAnc());control.addView(startButton,topSpaced());toneLabButton=secondaryButton("RUN 120 HZ CANCELLATION LAB");toneLabButton.setOnClickListener(v->toggleToneLab());control.addView(toneLabButton,topSpaced());graphButton=secondaryButton("OPEN LIVE WAVE GRAPH");graphButton.setOnClickListener(v->startActivity(new Intent(this,GraphActivity.class)));control.addView(graphButton,topSpaced());root.addView(control,spaced());
 
         root.addView(section("LIVE SESSION"));LinearLayout live=card(CARD_ALT,Color.rgb(42,62,79));
         runtimeText=text("Stopped · output muted",14,GREEN);runtimeText.setTypeface(Typeface.DEFAULT,Typeface.BOLD);live.addView(runtimeText);
@@ -133,7 +133,7 @@ public final class MainActivity extends Activity {
         if(broadbandText!=null){broadbandText.setVisibility(h?View.GONE:View.VISIBLE);if(!h){broadbandText.setText("ⓘ");broadbandText.setTag(room?"Room lanes require at least 1 dB reduction and repeatedly compare ANC-on against a muted baseline. Failed lanes are muted and quarantined. Measured-error FxNLMS handles residual outside owned lanes.":"Experimental residual 15–600 Hz feedback FxNLMS. It is limited to 25% of the ANC allowance, excludes active narrow lanes and latches off on feedback/runaway.");}}
         if(profileWarning!=null){if(h){profileWarning.setText("HEADPHONES · predictive 15–600 Hz feed-forward FxNLMS · stable-frequency discovery learning active");profileWarning.setTextColor(CYAN);}else if(room){profileWarning.setText("ROOM · direct error-microphone feedback · persistent tone discovery · strengthened iterative recipe learning");profileWarning.setTextColor(CYAN);}else{profileWarning.setText((ProfileStore.PROFILE_E46.equals(currentProfile)?"E46":"P38")+" · telemetry-tracked orders when available; automatic stable-line discovery otherwise.");profileWarning.setTextColor(AMBER);}}
         if(startButton!=null)startButton.setText(rt.audio.isRunning()?"STOP ANC":h?"START HEADPHONE ANC":room?"START ROOM ANC":"START VEHICLE ANC");
-        if(graphButton!=null)graphButton.setEnabled(true);
+        if(graphButton!=null)graphButton.setEnabled(true);if(toneLabButton!=null){toneLabButton.setText(rt.audio.isFixedToneLab()?"STOP 120 HZ CANCELLATION LAB":"RUN 120 HZ CANCELLATION LAB");toneLabButton.setEnabled(!rt.audio.isRunning()||rt.audio.isFixedToneLab());}
         if(positionCheck!=null){positionCheck.setChecked(false);positionCheck.setText(h?"Calibration only: IEMs are beside the phone microphone and are not being worn":room?"Room microphone is fixed at the listening position and the selected output is ready for a low-level route probe":"Vehicle is stationary/safe and the selected microphone/output are positioned for a low-level route probe");}
     }
 
@@ -164,6 +164,10 @@ public final class MainActivity extends Activity {
     }
 
     private void toggleAnc(){if(rt.audio.isRunning())stopAnc();else startAnc();}
+    private void toggleToneLab(){
+        if(rt.audio.isRunning()){stopAnc();return;}if(!hasAudioPermission()){requestAudioPermissionIfNeeded();return;}
+        boolean ok=rt.audio.startFixedToneLab120();if(ok){Intent s=new Intent(this,AncMediaService.class);if(Build.VERSION.SDK_INT>=26)startForegroundService(s);else startService(s);updateProfileUi();toast("120 Hz lab started · keep the test tone steady and start a WAV recording");}else toast("Could not start 120 Hz lab: "+rt.audio.getLastError());
+    }
     private void startAnc(){
         if(!hasAudioPermission()){requestAudioPermissionIfNeeded();return;}HeadphoneCalibration c=rt.audio.getCalibration();if(c==null||!currentProfile.equals(c.profileId)){toast("Load or create a route calibration for "+profileName()+" first");showPage(2);return;}if(!c.routeLooksCompatible(rt.audio.getInputRoute(),rt.audio.getOutputRoute()))toast("Stored calibration route differs from current route; recalibration is recommended.");
         boolean ok=isHeadphones()?rt.audio.startHeadphoneAnc():isRoom()?rt.audio.startRoomAnc(broadbandCheck!=null&&broadbandCheck.isChecked()):rt.audio.startVehicleAnc(currentProfile,broadbandCheck!=null&&broadbandCheck.isChecked(),profiles.loadMechanicalFrequencies(currentProfile));
@@ -175,9 +179,9 @@ public final class MainActivity extends Activity {
 
     private String profileName(){return profiles.loadProfileName(currentProfile);}
     private final Runnable statusTick=new Runnable(){@Override public void run(){
-        if(runtimeText!=null){String safety=rt.audio.getSafetyStatus();runtimeText.setText(String.format(Locale.US,"%s · %s · mic %.5f RMS · drive %.5f RMS · limit %d%%%s",rt.audio.isRunning()?"RUNNING":"STOPPED",profileName(),rt.audio.getInputRms(),rt.audio.getOutputRms(),rt.audio.getAntiNoisePercent(),safety==null||safety.isEmpty()?"":"\n"+safety));}
+        if(runtimeText!=null){String safety=rt.audio.getSafetyStatus();String session=rt.audio.isFixedToneLab()?"120 Hz cancellation lab":profileName();runtimeText.setText(String.format(Locale.US,"%s · %s · mic %.5f RMS · drive %.5f RMS · limit %d%%%s",rt.audio.isRunning()?"RUNNING":"STOPPED",session,rt.audio.getInputRms(),rt.audio.getOutputRms(),rt.audio.getAntiNoisePercent(),safety==null||safety.isEmpty()?"":"\n"+safety));}
         if(!isHeadphones()&&laneCountText!=null&&laneListText!=null){laneCountText.setText(String.format(Locale.US,"%d control lanes · %d persistent tones observed · %d actively cancelling",VehicleLaneRegistry.monitoredCount(),VehicleLaneRegistry.observedCount(),VehicleLaneRegistry.activeCount()));laneListText.setText(VehicleLaneRegistry.summary());}
-        if(startButton!=null)startButton.setText(rt.audio.isRunning()?"STOP ANC":isHeadphones()?"START HEADPHONE ANC":isRoom()?"START ROOM ANC":"START VEHICLE ANC");handler.postDelayed(this,400);
+        if(startButton!=null)startButton.setText(rt.audio.isRunning()?"STOP ANC":isHeadphones()?"START HEADPHONE ANC":isRoom()?"START ROOM ANC":"START VEHICLE ANC");if(toneLabButton!=null){toneLabButton.setText(rt.audio.isFixedToneLab()?"STOP 120 HZ CANCELLATION LAB":"RUN 120 HZ CANCELLATION LAB");toneLabButton.setEnabled(!rt.audio.isRunning()||rt.audio.isFixedToneLab());}handler.postDelayed(this,400);
     }};
 
     @Override protected void onResume(){super.onResume();if(profiles!=null&&profileSpinner!=null){refreshProfileAdapter();loadProfileState();}}

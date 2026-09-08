@@ -10,8 +10,8 @@ android {
         applicationId = "com.p38.anclab"
         minSdk = 26
         targetSdk = 35
-        versionCode = 28
-        versionName = "0.6.10-clean-tone-control-dev"
+        versionCode = 29
+        versionName = "0.6.11-120hz-physical-search-dev"
     }
 
     signingConfigs {
@@ -41,6 +41,6 @@ android {
 }
 
 dependencies {
-    // ANC v0.6.10 uses clean non-overlapping complex measurements and mandatory tiny local path identification before any calibrated narrowband drive.
+    // ANC v0.6.11 adds a calibration-independent 120 Hz physical phase/gain acceptance harness.
     testImplementation("junit:junit:4.13.2")
 }
