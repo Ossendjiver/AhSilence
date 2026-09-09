@@ -10,17 +10,31 @@ public final class AutoController {
 
     private enum Stage {
         IDLE, LISTENING, BASELINE, VERIFY_RECIPE, PROBE_POSITIVE, PROBE_NEGATIVE,
-        VERIFY_HALF, VERIFY_FULL, RUNNING, VERIFY_FINE, SEEK_FIRST, SEEK_SECOND,
-        SEEK_RETURN, FOLLOW_VERIFY
+        VERIFY_HALF, VERIFY_FULL, VERIFY_CONFIRM_BASELINE, VERIFY_CONFIRM_OUTPUT,
+        RUNNING, RUNNING_AB_BASELINE, RUNNING_AB_OUTPUT, VERIFY_FINE, SEEK_FIRST, SEEK_SECOND,
+        SEEK_RETURN, FOLLOW_VERIFY, REACQUIRE_BASELINE
     }
 
     private static final long LISTEN_MS = 1500;
-    private static final long SETTLE_MS = 650;
+    private static final long MINIMUM_SETTLE_MS = 650;
+    // SpectrumAnalyzer uses six cycles, bounded to 300-750 ms. After an output change, wait for
+    // the measured transport delay plus that complete observation window and an acoustic guard.
+    // The old fixed 650 ms wait mixed old and new commands on the measured 413-452 ms Bluetooth
+    // route; v0.6's 200-300 ms waits measured almost entirely the preceding command.
+    private static final long MINIMUM_OBSERVATION_WINDOW_MS = 300;
+    private static final long MAXIMUM_OBSERVATION_WINDOW_MS = 750;
+    private static final long OUTPUT_SETTLE_GUARD_MS = 100;
+    private static final long MAXIMUM_SETTLE_MS = 3000;
     private static final long ADAPT_INTERVAL_MS = 350;
     private static final double SEEK_STEP_HZ = 0.08;
     private static final double FOLLOW_DEADBAND_HZ = 0.04;
     private static final double CALIBRATION_RETUNE_HYSTERESIS_HZ = 0.55;
     private static final double RUNNING_VERIFY_HYSTERESIS_HZ = 0.20;
+    private static final double MINIMUM_CONFIRMED_REDUCTION_DB = 0.75;
+    private static final double LOUDER_THAN_MUTED_DB = 1.5;
+    private static final double LOUDER_THAN_BASELINE_RATIO = Math.pow(10.0, LOUDER_THAN_MUTED_DB / 20.0);
+    private static final int REQUIRED_REPEATABLE_REDUCTIONS = 2;
+    private static final long RUNNING_AB_INTERVAL_MS = 15000;
 
     private Stage stage = Stage.IDLE;
     private long stageStartedMs;
@@ -47,6 +61,13 @@ public final class AutoController {
     private double seekDirection;
     private double seekBestFrequency;
     private double seekBestResidual;
+    private double outputLatencyMs;
+    private Complex confirmationCommand = Complex.ZERO;
+    private Complex fullCandidateCommand = Complex.ZERO;
+    private Complex runningAbCommand = Complex.ZERO;
+    private long lastRunningAbMs;
+    private int repeatableReductions;
+    private int mutedReacquisitions;
 
     public synchronized void start(long nowMs, double maximumGain) {
         configure(nowMs, maximumGain, 34.5, false, "Dominant");
@@ -110,10 +131,16 @@ public final class AutoController {
         usingLearnedSecondaryPath = false;
         positiveProbeCommand = Complex.ZERO;
         positiveProbeResidual = Complex.ZERO;
+        confirmationCommand = Complex.ZERO;
+        fullCandidateCommand = Complex.ZERO;
+        runningAbCommand = Complex.ZERO;
         previousResidual = Double.POSITIVE_INFINITY;
         baselineResidual = Double.POSITIVE_INFINITY;
         currentImprovementDb = Double.NaN;
         rejectedAdaptations = 0;
+        lastRunningAbMs = nowMs;
+        repeatableReductions = 0;
+        mutedReacquisitions = 0;
     }
 
     public synchronized void stop() {
@@ -126,6 +153,15 @@ public final class AutoController {
         this.maximumGain = clamp(maximumGain, 0.0001, 0.15);
         command = command.clampMagnitude(this.maximumGain);
     }
+
+    /** Configure the measured output-to-error-microphone transport delay for clean A/B windows. */
+    public synchronized void setOutputLatencyMs(double outputLatencyMs) {
+        this.outputLatencyMs = Double.isFinite(outputLatencyMs)
+                ? clamp(outputLatencyMs, 0.0, MAXIMUM_SETTLE_MS - MAXIMUM_OBSERVATION_WINDOW_MS)
+                : 0.0;
+    }
+
+    public synchronized long observationSettleMs() { return settleMs(); }
 
     /**
      * Follow a measured/predicted tone without continuously invalidating an in-flight path probe.
@@ -143,6 +179,7 @@ public final class AutoController {
         if (stage == Stage.RUNNING) {
             frequencyHz = requestedHz;
             if (distance >= RUNNING_VERIFY_HYSTERESIS_HZ) {
+                repeatableReductions = 0;
                 stage = Stage.FOLLOW_VERIFY;
                 stageStartedMs = nowMs;
                 status = String.format(Locale.US, "%s: following %.2f Hz…", label, frequencyHz);
@@ -189,12 +226,17 @@ public final class AutoController {
             case PROBE_NEGATIVE -> updateNegativeProbe(snapshot, nowMs);
             case VERIFY_HALF -> updateHalf(snapshot, nowMs);
             case VERIFY_FULL -> updateFull(snapshot, nowMs);
+            case VERIFY_CONFIRM_BASELINE -> updateConfirmationBaseline(snapshot, nowMs);
+            case VERIFY_CONFIRM_OUTPUT -> updateConfirmationOutput(snapshot, nowMs);
             case RUNNING -> updateRunning(snapshot, nowMs);
+            case RUNNING_AB_BASELINE -> updateRunningAbBaseline(snapshot, nowMs);
+            case RUNNING_AB_OUTPUT -> updateRunningAbOutput(snapshot, nowMs);
             case VERIFY_FINE -> updateFine(snapshot, nowMs);
             case SEEK_FIRST -> updateSeekFirst(snapshot, nowMs);
             case SEEK_SECOND -> updateSeekSecond(snapshot, nowMs);
             case SEEK_RETURN -> updateSeekReturn(snapshot, nowMs);
             case FOLLOW_VERIFY -> updateFollow(snapshot, nowMs);
+            case REACQUIRE_BASELINE -> updateReacquireBaseline(snapshot, nowMs);
         }
         return output();
     }
@@ -215,7 +257,7 @@ public final class AutoController {
 
     private void updateBaseline(SpectrumSnapshot snapshot, long nowMs) {
         command = Complex.ZERO;
-        if (elapsed(nowMs) < SETTLE_MS || !targetMatches(snapshot)) return;
+        if (elapsed(nowMs) < settleMs() || !targetMatches(snapshot)) return;
         baseline = snapshot.targetComplex();
         baselineResidual = baseline.magnitude();
         if (learnedSecondaryPath.magnitude() >= 1.0e-5) {
@@ -250,7 +292,7 @@ public final class AutoController {
     }
 
     private void updateRecipe(SpectrumSnapshot snapshot, long nowMs) {
-        if (elapsed(nowMs) < SETTLE_MS || !targetMatches(snapshot)) return;
+        if (elapsed(nowMs) < settleMs() || !targetMatches(snapshot)) return;
         double residual = snapshot.targetComplex().magnitude();
         Complex delta = snapshot.targetComplex().subtract(baseline);
         if (residual > baselineResidual * 1.05 || delta.magnitude() < Math.max(1.0e-5, baselineResidual * 0.02)) {
@@ -275,7 +317,7 @@ public final class AutoController {
     }
 
     private void updatePositiveProbe(SpectrumSnapshot snapshot, long nowMs) {
-        if (elapsed(nowMs) < SETTLE_MS || !targetMatches(snapshot)) return;
+        if (elapsed(nowMs) < settleMs() || !targetMatches(snapshot)) return;
         positiveProbeCommand = command;
         positiveProbeResidual = snapshot.targetComplex();
         command = command.negate();
@@ -285,7 +327,7 @@ public final class AutoController {
     }
 
     private void updateNegativeProbe(SpectrumSnapshot snapshot, long nowMs) {
-        if (elapsed(nowMs) < SETTLE_MS || !targetMatches(snapshot)) return;
+        if (elapsed(nowMs) < settleMs() || !targetMatches(snapshot)) return;
         Complex negativeProbeResidual = snapshot.targetComplex();
         Complex difference = positiveProbeResidual.subtract(negativeProbeResidual);
         secondaryPath = difference.divide(positiveProbeCommand.multiply(2.0));
@@ -307,7 +349,7 @@ public final class AutoController {
     }
 
     private void updateHalf(SpectrumSnapshot snapshot, long nowMs) {
-        if (elapsed(nowMs) < SETTLE_MS || !targetMatches(snapshot)) return;
+        if (elapsed(nowMs) < settleMs() || !targetMatches(snapshot)) return;
         double residual = snapshot.targetComplex().magnitude();
         if (residual > baselineResidual * 1.03) {
             if (usingLearnedSecondaryPath) {
@@ -321,14 +363,17 @@ public final class AutoController {
         }
         previousCommand = command;
         previousResidual = residual;
-        command = baseline.negate().divide(secondaryPath).clampMagnitude(maximumGain);
-        stage = Stage.VERIFY_FULL;
+        fullCandidateCommand = baseline.negate().divide(secondaryPath).clampMagnitude(maximumGain);
+        confirmationCommand = command;
+        repeatableReductions = 0;
+        command = Complex.ZERO;
+        stage = Stage.VERIFY_CONFIRM_BASELINE;
         stageStartedMs = nowMs;
-        status = label + ": testing calculated level…";
+        status = label + ": repeating muted/active check before increasing gain…";
     }
 
     private void updateFull(SpectrumSnapshot snapshot, long nowMs) {
-        if (elapsed(nowMs) < SETTLE_MS || !targetMatches(snapshot)) return;
+        if (elapsed(nowMs) < settleMs() || !targetMatches(snapshot)) return;
         double residual = snapshot.targetComplex().magnitude();
         if (residual > previousResidual * 1.03) {
             command = previousCommand;
@@ -344,16 +389,88 @@ public final class AutoController {
             reject("no repeatable reduction");
             return;
         }
+        // Certify against a new adjacent muted baseline, not the older baseline used to calculate
+        // this command. This prevents a transient reduction from becoming a saved recipe.
         usingLearnedSecondaryPath = false;
+        confirmationCommand = command;
+        repeatableReductions = 0;
+        command = Complex.ZERO;
+        stage = Stage.VERIFY_CONFIRM_BASELINE;
+        stageStartedMs = nowMs;
+        status = label + ": confirming against a fresh muted baseline…";
+    }
+
+    private void updateConfirmationBaseline(SpectrumSnapshot snapshot, long nowMs) {
+        if (elapsed(nowMs) < settleMs() || !targetMatches(snapshot)) return;
+        baseline = snapshot.targetComplex();
+        baselineResidual = baseline.magnitude();
+        if (baselineResidual < 1.0e-7) { reject("confirmation baseline was silent"); return; }
+        command = confirmationCommand;
+        stage = Stage.VERIFY_CONFIRM_OUTPUT;
+        stageStartedMs = nowMs;
+        status = label + ": confirming the reduction…";
+    }
+
+    private void updateConfirmationOutput(SpectrumSnapshot snapshot, long nowMs) {
+        if (elapsed(nowMs) < settleMs() || !targetMatches(snapshot)) return;
+        double residual = snapshot.targetComplex().magnitude();
+        double improvement = 20.0 * Math.log10(Math.max(baselineResidual, 1.0e-9)
+                / Math.max(residual, 1.0e-9));
+        if (residual > baselineResidual * LOUDER_THAN_BASELINE_RATIO) {
+            beginMutedReacquisition(nowMs, "active trial was more than 1.5 dB louder");
+            return;
+        }
+        if (!Double.isFinite(improvement) || improvement < MINIMUM_CONFIRMED_REDUCTION_DB) {
+            reject("reduction did not repeat");
+            return;
+        }
         previousResidual = residual;
         previousCommand = command;
+        repeatableReductions++;
+        if (repeatableReductions < REQUIRED_REPEATABLE_REDUCTIONS) {
+            confirmationCommand = command;
+            command = Complex.ZERO;
+            stage = Stage.VERIFY_CONFIRM_BASELINE;
+            stageStartedMs = nowMs;
+            status = label + ": repeating muted/active verification…";
+            return;
+        }
+        if (fullCandidateCommand.magnitude() > command.magnitude() * 1.02) {
+            command = fullCandidateCommand;
+            fullCandidateCommand = Complex.ZERO;
+            stage = Stage.VERIFY_FULL;
+            stageStartedMs = nowMs;
+            status = label + ": two reductions confirmed; testing increased gain…";
+            return;
+        }
+        confirmationCommand = Complex.ZERO;
         stage = Stage.RUNNING;
         stageStartedMs = nowMs;
+        lastRunningAbMs = nowMs;
         status = improvementStatus(residual);
     }
 
     private void updateRunning(SpectrumSnapshot snapshot, long nowMs) {
-        if (!fixedTarget && elapsed(nowMs) >= SETTLE_MS) {
+        if (targetMatches(snapshot)) {
+            double measuredResidual = snapshot.targetComplex().magnitude();
+            // Continuously report achieved attenuation. A clean snapshot more than 1.5 dB above
+            // the latest muted reference is enough to mute immediately; output is never allowed to
+            // persist merely to confirm that it is making the cabin louder.
+            status = improvementStatus(measuredResidual);
+            if (measuredResidual > baselineResidual * LOUDER_THAN_BASELINE_RATIO) {
+                beginMutedReacquisition(nowMs, "residual became more than 1.5 dB louder");
+                return;
+            }
+            if (nowMs - lastRunningAbMs >= RUNNING_AB_INTERVAL_MS) {
+                runningAbCommand = command;
+                command = Complex.ZERO;
+                stage = Stage.RUNNING_AB_BASELINE;
+                stageStartedMs = nowMs;
+                status = label + ": periodic A/B · measuring muted residual…";
+                return;
+            }
+        }
+        if (!fixedTarget && elapsed(nowMs) >= settleMs()) {
             double drift = snapshot.peakFrequencyHz() - frequencyHz;
             if (Math.abs(drift) >= 0.06 && Math.abs(drift) <= 0.60) {
                 seekCentreFrequency = frequencyHz;
@@ -387,21 +504,67 @@ public final class AutoController {
                     .multiply(-stepSize / normalization).clampMagnitude(maximumGain * 0.18);
             previousCommand = command;
             previousResidual = residual;
-            command = command.multiply(0.9995).add(gradient).clampMagnitude(maximumGain);
+            Complex candidate = command.multiply(0.9995).add(gradient).clampMagnitude(maximumGain);
+            if (candidate.magnitude() > command.magnitude()
+                    && repeatableReductions < REQUIRED_REPEATABLE_REDUCTIONS)
+                candidate = candidate.clampMagnitude(command.magnitude());
+            command = candidate;
             stage = Stage.VERIFY_FINE;
             stageStartedMs = nowMs;
             status = label + ": filtered-X adapting phase and level…";
         }
     }
 
+    private void updateRunningAbBaseline(SpectrumSnapshot snapshot, long nowMs) {
+        command = Complex.ZERO;
+        if (elapsed(nowMs) < settleMs() || !targetMatches(snapshot)) return;
+        baseline = snapshot.targetComplex();
+        baselineResidual = baseline.magnitude();
+        if (baselineResidual < 1.0e-7 || runningAbCommand.magnitude() < 1.0e-7) {
+            reject("periodic A/B baseline was unusable");
+            return;
+        }
+        command = runningAbCommand.clampMagnitude(maximumGain);
+        stage = Stage.RUNNING_AB_OUTPUT;
+        stageStartedMs = nowMs;
+        status = label + ": periodic A/B · measuring active residual…";
+    }
+
+    private void updateRunningAbOutput(SpectrumSnapshot snapshot, long nowMs) {
+        if (elapsed(nowMs) < settleMs() || !targetMatches(snapshot)) return;
+        double active = snapshot.targetComplex().magnitude();
+        if (active > baselineResidual * LOUDER_THAN_BASELINE_RATIO) {
+            beginMutedReacquisition(nowMs, "periodic A/B was more than 1.5 dB louder");
+            return;
+        }
+        double improvement = 20.0 * Math.log10(Math.max(baselineResidual, 1.0e-9)
+                / Math.max(active, 1.0e-9));
+        if (Double.isFinite(improvement) && improvement >= MINIMUM_CONFIRMED_REDUCTION_DB) {
+            repeatableReductions = Math.min(REQUIRED_REPEATABLE_REDUCTIONS, repeatableReductions + 1);
+            previousResidual = active;
+        } else {
+            repeatableReductions = 0;
+            command = command.multiply(0.80);
+        }
+        runningAbCommand = Complex.ZERO;
+        lastRunningAbMs = nowMs;
+        stage = Stage.RUNNING;
+        stageStartedMs = nowMs;
+        status = improvementStatus(active);
+    }
+
     private void updateFine(SpectrumSnapshot snapshot, long nowMs) {
-        if (elapsed(nowMs) < SETTLE_MS || !targetMatches(snapshot)) return;
+        if (elapsed(nowMs) < settleMs() || !targetMatches(snapshot)) return;
         Complex measuredCommand = command;
         double residual = snapshot.targetComplex().magnitude();
         if (residual > Math.min(baselineResidual * 1.02, previousResidual * 1.25)) {
             command = previousCommand;
             residual = previousResidual;
             rejectedAdaptations++;
+            if (snapshot.targetComplex().magnitude() > baselineResidual * LOUDER_THAN_BASELINE_RATIO) {
+                beginMutedReacquisition(nowMs, "adaptation made the residual louder");
+                return;
+            }
             if (rejectedAdaptations >= 3) {
                 // The secondary path usually remains valid while road/engine phase changes. Infer
                 // the new disturbance from the measured residual and current command, then safely
@@ -430,8 +593,40 @@ public final class AutoController {
         status = improvementStatus(residual);
     }
 
+    private void beginMutedReacquisition(long nowMs, String reason) {
+        command = Complex.ZERO;
+        previousCommand = Complex.ZERO;
+        confirmationCommand = Complex.ZERO;
+        fullCandidateCommand = Complex.ZERO;
+        runningAbCommand = Complex.ZERO;
+        currentImprovementDb = Double.NaN;
+        repeatableReductions = 0;
+        mutedReacquisitions++;
+        stage = Stage.REACQUIRE_BASELINE;
+        stageStartedMs = nowMs;
+        status = label + ": " + reason + "; muted and reacquiring phase…";
+    }
+
+    private void updateReacquireBaseline(SpectrumSnapshot snapshot, long nowMs) {
+        command = Complex.ZERO;
+        if (elapsed(nowMs) < settleMs() || !targetMatches(snapshot)) return;
+        baseline = snapshot.targetComplex();
+        baselineResidual = baseline.magnitude();
+        previousCommand = Complex.ZERO;
+        previousResidual = baselineResidual;
+        rejectedAdaptations = 0;
+        if (baselineResidual < 1.0e-7) { reject("reacquisition baseline was silent"); return; }
+        if (secondaryPath.magnitude() < 1.0e-5) { beginProbe(nowMs); return; }
+        command = baseline.negate().divide(secondaryPath)
+                .clampMagnitude(maximumGain).multiply(0.5);
+        usingLearnedSecondaryPath = true;
+        stage = Stage.VERIFY_HALF;
+        stageStartedMs = nowMs;
+        status = label + ": muted baseline captured; validating reacquired phase…";
+    }
+
     private void updateSeekFirst(SpectrumSnapshot snapshot, long nowMs) {
-        if (elapsed(nowMs) < SETTLE_MS || !targetMatches(snapshot)) return;
+        if (elapsed(nowMs) < settleMs() || !targetMatches(snapshot)) return;
         double residual = snapshot.targetComplex().magnitude();
         if (residual < seekBestResidual) { seekBestResidual = residual; seekBestFrequency = frequencyHz; }
         frequencyHz = seekCentreFrequency - seekDirection * SEEK_STEP_HZ;
@@ -441,7 +636,7 @@ public final class AutoController {
     }
 
     private void updateSeekSecond(SpectrumSnapshot snapshot, long nowMs) {
-        if (elapsed(nowMs) < SETTLE_MS || !targetMatches(snapshot)) return;
+        if (elapsed(nowMs) < settleMs() || !targetMatches(snapshot)) return;
         double residual = snapshot.targetComplex().magnitude();
         if (residual < seekBestResidual) { seekBestResidual = residual; seekBestFrequency = frequencyHz; }
         frequencyHz = seekBestFrequency;
@@ -451,7 +646,7 @@ public final class AutoController {
     }
 
     private void updateSeekReturn(SpectrumSnapshot snapshot, long nowMs) {
-        if (elapsed(nowMs) < SETTLE_MS || !targetMatches(snapshot)) return;
+        if (elapsed(nowMs) < settleMs() || !targetMatches(snapshot)) return;
         previousResidual = snapshot.targetComplex().magnitude();
         stage = Stage.RUNNING;
         stageStartedMs = nowMs;
@@ -459,7 +654,7 @@ public final class AutoController {
     }
 
     private void updateFollow(SpectrumSnapshot snapshot, long nowMs) {
-        if (elapsed(nowMs) < SETTLE_MS || !targetMatches(snapshot)) return;
+        if (elapsed(nowMs) < settleMs() || !targetMatches(snapshot)) return;
         previousResidual = snapshot.targetComplex().magnitude();
         stage = Stage.RUNNING;
         stageStartedMs = nowMs;
@@ -479,9 +674,17 @@ public final class AutoController {
     public synchronized String stageName() { return stage.name(); }
     public synchronized String label() { return label; }
     public synchronized double currentImprovementDb() { return currentImprovementDb; }
+    public synchronized int mutedReacquisitions() { return mutedReacquisitions; }
     public synchronized Complex secondaryPathEstimate() { return secondaryPath; }
     public synchronized boolean hasUsableSecondaryPathEstimate() { return secondaryPath.magnitude() >= 1.0e-5; }
     private boolean targetMatches(SpectrumSnapshot snapshot) { return Math.abs(snapshot.targetFrequencyHz() - frequencyHz) < 0.035; }
+    private long settleMs() {
+        long cycles = Math.round(6000.0 / Math.max(8.0, frequencyHz));
+        long observation = Math.max(MINIMUM_OBSERVATION_WINDOW_MS,
+                Math.min(MAXIMUM_OBSERVATION_WINDOW_MS, cycles));
+        long clean = Math.round(outputLatencyMs) + observation + OUTPUT_SETTLE_GUARD_MS;
+        return Math.min(MAXIMUM_SETTLE_MS, Math.max(MINIMUM_SETTLE_MS, clean));
+    }
     private long elapsed(long nowMs) { return nowMs - stageStartedMs; }
 
     private String improvementStatus(double residual) {

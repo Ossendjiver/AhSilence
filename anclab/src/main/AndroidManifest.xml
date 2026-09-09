@@ -15,11 +15,14 @@
 
     <application
         android:allowBackup="true"
+        android:icon="@mipmap/ic_launcher"
         android:label="ANC Lab"
+        android:roundIcon="@mipmap/ic_launcher_round"
         android:theme="@style/Theme.ANCLab"
         android:usesCleartextTraffic="false">
         <meta-data android:name="com.google.android.gms.car.application" android:resource="@xml/automotive_app_desc" />
         <activity android:name=".GraphActivity" android:exported="false" android:screenOrientation="portrait" />
+        <activity android:name=".ProfileSettingsActivity" android:exported="false" android:screenOrientation="portrait" android:parentActivityName=".MainActivity" />
         <activity android:name=".MainActivity" android:exported="true" android:screenOrientation="portrait">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
@@ -37,5 +40,11 @@
                 <action android:name="android.media.action.MEDIA_PLAY_FROM_SEARCH" />
             </intent-filter>
         </service>
+        <receiver android:name=".AutoStartReceiver" android:exported="false">
+            <intent-filter>
+                <action android:name="android.bluetooth.device.action.ACL_CONNECTED" />
+                <action android:name="android.hardware.usb.action.USB_DEVICE_ATTACHED" />
+            </intent-filter>
+        </receiver>
     </application>
 </manifest>

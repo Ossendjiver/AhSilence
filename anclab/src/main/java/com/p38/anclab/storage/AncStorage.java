@@ -81,6 +81,8 @@ public final class AncStorage {
         ensureDirectory("profiles");
         ensureDirectory("profiles/headphones");
         ensureDirectory("profiles/p38");
+        ensureDirectory("profiles/e46");
+        ensureDirectory("profiles/microphones");
         ensureDirectory("calibration");
         ensureDirectory("logs");
         ensureDirectory("wav");

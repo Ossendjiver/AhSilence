@@ -1,6 +1,7 @@
 package com.p38.anclab;
 
 import android.app.Activity;
+import android.app.AlertDialog;
 import android.graphics.Canvas;
 import android.graphics.Color;
 import android.graphics.Paint;
@@ -9,6 +10,8 @@ import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
 import android.view.View;
+import android.view.Gravity;
+import android.widget.Button;
 import android.widget.CheckBox;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
@@ -40,8 +43,7 @@ public final class GraphActivity extends Activity {
         scroll.addView(root);
         setContentView(scroll);
 
-        root.addView(text("HEADPHONE ANC · LIVE GRAPH",24,Color.WHITE));
-        root.addView(text("Phone microphone = external reference only. Predicted cancellation and predicted ear output are modelled from the stored headphone calibration; they are not measured inside the ear.",12,Color.rgb(255,184,108)));
+        LinearLayout title=new LinearLayout(this);title.setOrientation(LinearLayout.HORIZONTAL);title.setGravity(Gravity.CENTER_VERTICAL);Button back=new Button(this);back.setText("‹");back.setTextSize(26);back.setContentDescription("Back");back.setOnClickListener(v->finish());title.addView(back,new LinearLayout.LayoutParams(dp(48),dp(48)));title.addView(text("LIVE WAVE GRAPH",24,Color.WHITE),new LinearLayout.LayoutParams(0,-2,1f));TextView info=text("ⓘ",19,Color.rgb(70,205,220));info.setPadding(dp(8),dp(4),dp(8),dp(4));info.setOnClickListener(v->new AlertDialog.Builder(this).setTitle("Live graph").setMessage("Reference is measured at the selected microphone. Cancellation and predicted residual use the stored output-to-microphone calibration model.").setPositiveButton("OK",null).show());title.addView(info);root.addView(title);
 
         graph = new WaveGraph();
         root.addView(graph,new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT,dp(360)));
@@ -53,7 +55,6 @@ public final class GraphActivity extends Activity {
 
         stats = text("Waiting for ANC data…",12,Color.rgb(170,170,175));
         root.addView(stats);
-        root.addView(text("Waveform window is decimated for display only (~2 kHz diagnostic stream). The ANC engine itself continues at 48 kHz.",11,Color.rgb(145,145,150)));
     }
 
     private CheckBox traceToggle(String label, boolean checked, int index) {

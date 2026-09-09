@@ -10,6 +10,7 @@ import com.p38.anclab.profile.MechanicalFrequency;
 import com.p38.anclab.profile.ProfileStore;
 import com.p38.anclab.recording.AppLog;
 import com.p38.anclab.storage.AncStorage;
+import com.p38.anclab.settings.AppSettings;
 
 import org.json.JSONArray;
 import org.json.JSONObject;
@@ -48,6 +49,7 @@ public final class VehicleTelemetryRuntime {
     private final AncStorage storage;
     private final GpsTelemetry gps;
     private final ObdClient obd;
+    private final AppSettings settings;
     private volatile TelemetryState telemetry=TelemetryState.empty();
     private volatile String activeProfile=ProfileStore.PROFILE_P38;
     private final Map<String,MechanicalFrequency> models=new LinkedHashMap<>();
@@ -58,7 +60,7 @@ public final class VehicleTelemetryRuntime {
     private Thread watchdog;
 
     private VehicleTelemetryRuntime(Context context,AncStorage storage){
-        this.context=context;this.storage=storage;
+        this.context=context;this.storage=storage;this.settings=new AppSettings(context);
         gps=new GpsTelemetry(context,(speed,accuracy,status,now)->{
             TelemetryState old=telemetry;
             telemetry=old.withGps(speed,accuracy,status,now);
@@ -84,6 +86,11 @@ public final class VehicleTelemetryRuntime {
     public void touch(){lastTouchElapsedMs=SystemClock.elapsedRealtime();}
 
     public TelemetryState telemetry(){touch();return telemetry;}
+    public List<ObdClient.DeviceChoice> pairedObdDevices(){return obd.pairedDevices();}
+    public String selectedObdAddress(){return settings.obdAddress();}
+    public String selectedObdDevice(){return obdDevice;}
+    public synchronized void selectObdDevice(String address){touch();settings.setObdAddress(address);obd.close();obdDevice="";if(address!=null&&!address.isBlank()){for(ObdClient.DeviceChoice choice:obd.pairedDevices())if(address.equalsIgnoreCase(choice.address())){obdDevice=choice.toString();break;}obd.connect(address);}}
+    public synchronized void disconnectObd(){obd.close();telemetry=telemetry.withObd(Double.NaN,Double.NaN,Double.NaN,Double.NaN,"OBD disconnected",SystemClock.elapsedRealtime());}
 
     /** Current physical-source value used by one model, with conservative P38 RPM estimation. */
     public double sourceValue(MechanicalFrequency model){
@@ -147,6 +154,7 @@ public final class VehicleTelemetryRuntime {
     }
 
     public synchronized String status(){
+        touch();
         TelemetryState t=telemetry;double rpm=Double.isFinite(t.engineRpm())?t.engineRpm():estimatedP38Rpm(t.bestSpeedKmh());
         String rpmTag=Double.isFinite(t.engineRpm())?"OBD RPM":"est RPM";
         int learnedCount=0;for(Learned l:learned.values())if(l.observations>0)learnedCount++;
@@ -165,8 +173,9 @@ public final class VehicleTelemetryRuntime {
         if(obd.isRunning())return;
         if(Build.VERSION.SDK_INT>=31&&context.checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT)!=PackageManager.PERMISSION_GRANTED)return;
         try{
-            List<ObdClient.DeviceChoice> choices=obd.pairedDevices();ObdClient.DeviceChoice best=null;
-            for(ObdClient.DeviceChoice c:choices){String n=c.name()==null?"":c.name().toLowerCase(Locale.US);if(n.contains("obd")||n.contains("elm")||n.contains("vgate")||n.contains("v-link")||n.contains("vlink")||n.contains("veepeak")){best=c;break;}}
+            List<ObdClient.DeviceChoice> choices=obd.pairedDevices();ObdClient.DeviceChoice best=null;String selected=settings.obdAddress();
+            if(selected!=null&&!selected.isBlank())for(ObdClient.DeviceChoice c:choices)if(selected.equalsIgnoreCase(c.address())){best=c;break;}
+            if(best==null)for(ObdClient.DeviceChoice c:choices){String n=c.name()==null?"":c.name().toLowerCase(Locale.US);if(n.contains("obd")||n.contains("elm")||n.contains("vgate")||n.contains("v-link")||n.contains("vlink")||n.contains("veepeak")){best=c;break;}}
             if(best!=null){obdDevice=best.toString();obd.connect(best.address());}
         }catch(Throwable e){AppLog.e(TAG,"OBD auto-connect failed",e);}
     }

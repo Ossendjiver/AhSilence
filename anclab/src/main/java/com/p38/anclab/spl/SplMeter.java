@@ -2,7 +2,7 @@ package com.p38.anclab.spl;
 
 /** Converts unweighted digital RMS into calibrated or relative SPL statistics. */
 public final class SplMeter {
-    private double calibrationOffsetDb = 100.0;
+    private double calibrationOffsetDb = 0.0;
     private boolean calibrated;
     private double energySum;
     private long sampleCount;
@@ -14,11 +14,15 @@ public final class SplMeter {
         resetStatistics();
     }
 
-    public synchronized double update(double broadbandDbFs) {
+    public synchronized double update(double broadbandDbFs) { return update(broadbandDbFs,1); }
+
+    /** Adds a block using its sample count so Leq is independent of callback size. */
+    public synchronized double update(double broadbandDbFs, long samples) {
         if (!Double.isFinite(broadbandDbFs)) return Double.NaN;
         double spl = broadbandDbFs + calibrationOffsetDb;
-        energySum += Math.pow(10.0, spl / 10.0);
-        sampleCount++;
+        long weight=Math.max(1,samples);
+        energySum += Math.pow(10.0, spl / 10.0)*weight;
+        sampleCount+=weight;
         maximum = Math.max(maximum, spl);
         return spl;
     }

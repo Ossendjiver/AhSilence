@@ -5,18 +5,20 @@ plugins {
 android {
     namespace = "com.p38.anclab"
     compileSdk = 36
+    buildToolsVersion = "36.0.0"
 
     defaultConfig {
         applicationId = "com.p38.anclab"
         minSdk = 26
         targetSdk = 35
-        versionCode = 16
-        versionName = "0.5.9.1-rebuild"
+        versionCode = 35
+        versionName = "0.5.9.6-recovery"
     }
 
     signingConfigs {
         create("ancLabDev") {
-            storeFile = file(System.getProperty("user.home") + "/.android/debug.keystore")
+            storeFile = file(System.getenv("ANC_LAB_KEYSTORE")
+                ?: (System.getProperty("user.home") + "/.android/debug.keystore"))
             storePassword = "android"
             keyAlias = "androiddebugkey"
             keyPassword = "android"

@@ -28,16 +28,29 @@ public class AutoControllerSecondaryPathRecipeTest {
         controller.startTrackingWithSecondaryPath(0, 0.05, FREQUENCY_HZ,
                 "saved path", true, secondaryPath);
 
-        controller.update(snapshot(disturbance), 700);
+        controller.update(snapshot(disturbance), 850);
         Complex optimum = disturbance.negate().divide(secondaryPath);
         assertEquals("VERIFY_HALF", controller.stageName());
         assertComplex(optimum.multiply(0.5), controller.output().coefficient());
 
-        controller.update(snapshot(disturbance.add(secondaryPath.multiply(controller.output().coefficient()))), 1400);
+        controller.update(snapshot(disturbance.add(secondaryPath.multiply(controller.output().coefficient()))), 1700);
+        assertEquals("VERIFY_CONFIRM_BASELINE", controller.stageName());
+        assertComplex(Complex.ZERO, controller.output().coefficient());
+
+        controller.update(snapshot(disturbance), 2550);
+        assertEquals("VERIFY_CONFIRM_OUTPUT", controller.stageName());
+        controller.update(snapshot(disturbance.add(secondaryPath.multiply(controller.output().coefficient()))), 3400);
+        assertEquals("VERIFY_CONFIRM_BASELINE", controller.stageName());
+        controller.update(snapshot(disturbance), 4250);
+        controller.update(snapshot(disturbance.add(secondaryPath.multiply(controller.output().coefficient()))), 5100);
         assertEquals("VERIFY_FULL", controller.stageName());
         assertComplex(optimum, controller.output().coefficient());
 
-        controller.update(snapshot(disturbance.add(secondaryPath.multiply(controller.output().coefficient()))), 2100);
+        controller.update(snapshot(disturbance.add(secondaryPath.multiply(controller.output().coefficient()))), 5950);
+        controller.update(snapshot(disturbance), 6800);
+        controller.update(snapshot(disturbance.add(secondaryPath.multiply(controller.output().coefficient()))), 7650);
+        controller.update(snapshot(disturbance), 8500);
+        controller.update(snapshot(disturbance.add(secondaryPath.multiply(controller.output().coefficient()))), 9350);
         assertEquals("RUNNING", controller.stageName());
     }
 
@@ -45,14 +58,14 @@ public class AutoControllerSecondaryPathRecipeTest {
         Complex secondaryPath = Complex.polar(2.0, -0.40);
         Complex disturbance = Complex.polar(0.04, 0.75);
         AutoController controller = runWarmStart(secondaryPath, disturbance);
-        long now = 2_500;
+        long now = 10_200;
 
         for (int attempt = 0; attempt < 3; attempt++) {
             controller.update(snapshot(Complex.polar(0.02, 1.4)), now);
             assertEquals("VERIFY_FINE", controller.stageName());
-            now += 700;
+            now += 850;
             controller.update(snapshot(Complex.polar(0.04, -1.0)), now);
-            now += 400;
+            now += 850;
         }
 
         assertEquals("VERIFY_HALF", controller.stageName());
@@ -62,9 +75,8 @@ public class AutoControllerSecondaryPathRecipeTest {
         AutoController controller = new AutoController();
         controller.startTrackingWithSecondaryPath(0, 0.05, FREQUENCY_HZ,
                 "saved path", true, secondaryPath);
-        controller.update(snapshot(disturbance), 700);
-        controller.update(snapshot(disturbance.add(secondaryPath.multiply(controller.output().coefficient()))), 1400);
-        controller.update(snapshot(disturbance.add(secondaryPath.multiply(controller.output().coefficient()))), 2100);
+        for(long now=850;now<=10_200&&!"RUNNING".equals(controller.stageName());now+=850)
+            controller.update(snapshot(disturbance.add(secondaryPath.multiply(controller.output().coefficient()))),now);
         return controller;
     }
 

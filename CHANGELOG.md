@@ -4,6 +4,70 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.9.6-recovery] — 2026-09-10
+
+### Changed
+- Treat GPS/OBD mechanical predictions as search hints and require a repeatable microphone-confirmed narrowband line before emitting.
+- Continuously verify each target with muted/active comparisons, require two repeatable reductions before increasing gain, and immediately mute/reacquire phase at a 1.5 dB worsening.
+- Reduce the cancellation ceiling for 20–40 Hz targets while verification is active.
+- Store microphone response and absolute SPL calibration separately under stable physical-device identities. UMIK sensitivity metadata is no longer converted into absolute SPL.
+
+### Added
+- Add a four-pair, 160-second ANC OFF/ON evaluation recording from the SPL page and broadcast `test cycle complete` after saving its WAV and CSV.
+
+## [0.5.9.5-recovery] — 2026-09-09
+
+### Changed
+- Replace the vehicle controller's equal `1/N` lane split with a guarded multitone RMS budget. With ten active P38 targets at the default 50% setting, each lane can now reach about 0.0091 full-scale instead of 0.0040 (2.28× more probe and cancellation authority).
+- Keep the combined generated signal inside the existing profile/user hard ceiling, so increased per-tone authority does not bypass the master anti-noise limit or the louder-than-baseline mute/reacquisition watchdog.
+
+### Analysis
+- Reviewed the 468.5-second `session-20260909-174429.wav` field recording. Its generated-output channel was present throughout, but median output RMS was only 0.00785 and the strongest emitted tone was typically about 0.005 full-scale, confirming per-lane allocation—not the combined hard limiter—was the practical restriction.
+
+## [0.5.9.4-recovery] — 2026-09-09
+
+### Added
+- Measure route delay with two independent pseudo-random probes, persist both delay and confidence results, and show their absolute difference as a route-stability figure.
+- Warn when the repeated delay measurements differ by more than 5 ms. Runtime A/B verification windows use the slower measured delay so stale anti-noise is not scored as a new command.
+- Continuously report measured narrowband reduction while a cancellation lane is running.
+
+### Safety
+- If a lane remains more than 3% louder than its muted baseline for 450 ms, immediately mute it, wait for a clean acoustic window, reacquire the disturbance phase, and verify the replacement command at half strength before resuming.
+
+## [0.5.9.3-recovery] — 2026-09-09
+
+### Added
+- Show a prominent warning whenever a Bluetooth microphone or output is selected, recommending narrowband-first operation and broadband-off until the route proves stable.
+- Show the matching stored latency and correlation quality directly beside Bluetooth routing, with a soft recheck recommendation after seven days. The existing single route-calibration test remains the lightweight latency check; no continuous latency chasing was added.
+
+## [0.5.9.2-recovery] — 2026-09-08
+
+### Added
+- Restore the dark three-page app surface with an independent SPL meter, WAV/session recording, route-preserving audio selectors and compact information dialogs instead of persistent help copy.
+- Add editable P38, E46 and separate conservative headphone profiles. Vehicle profiles store expandable telemetry-linked mechanical-frequency models under `Documents/ANC/profiles/<profile>`.
+- Add route-specific microphone calibration imports, a persistent default reference microphone, and a three-second reference/selected-microphone SPL benchmark workflow that does not require ANC.
+- Add collapsible settings for Android Auto, screen wake, device autostart, continuous monitoring logs, selected audio routes and a paired Bluetooth OBD2 adaptor.
+- Add Android Auto/media actions for Start, Auto, Record, Stop and independent SPL; Auto and Record remain available while ANC is stopped and start the prepared vehicle profile when selected.
+- Add an original adaptive outline `ANC` launcher mark compatible with monochrome icon theming and the thin-outline visual language used by Lines Free.
+
+### Fixed
+- Use the stored route-calibration delay in every vehicle narrowband controller and wait for the transport delay plus a completely fresh six-cycle observation window before measuring a changed output command.
+- Require a successful command to repeat against a new adjacent muted baseline before entering `RUNNING` or becoming eligible for recipe storage.
+- Detect quiet but locally prominent stable lines without adopting v0.6's unsafe -110 dBFS admission floor.
+- Replace v0.6's allocation-heavy 16k discovery analysis with a bounded sampled local median and 4k FFT at the 500 Hz analysis rate.
+- Record diagnostic WAV files as 32-bit float so low-level anti-noise is not quantised away.
+- Include per-lane frequency, gain, controller stage, measured improvement and telemetry/status text in both explicit session CSVs and the optional background monitoring log.
+- Stop visibly after one second of exact digital microphone silence instead of continuing with an invalid capture stream.
+- Keep ANC and standalone SPL alive under a foreground microphone/media service and partial wake lock while the screen is off; the optional screen-wake preference is independent.
+- Preserve selected input/output devices across refreshes by stable route name unless the endpoint has actually disappeared.
+- Make Start Log start ANC first, and make stopping ANC stop and save any active WAV/CSV session.
+- Restore the saved input and its microphone calibration when standalone SPL is launched from Android Auto.
+
+### Validation basis
+- Production discovery replayed the first 12 seconds of the v0.6.12 120 Hz recording and the final reinstalled-v0.5.8 recording with 100% raw target hits, 91.3% mature-candidate coverage and first eligibility at 1.6 seconds.
+- A delayed closed-loop regression uses the measured 430 ms Bluetooth route, a trailing 300 ms analyzer window and a synthetic acoustic secondary path; the recovered controller reaches confirmed `RUNNING` with more than 6 dB modelled reduction.
+- The full JVM-testable ANC Lab suite passes 35 tests. See `docs/v059-recovery-audit-2026-09-08.md` for the version and recording audit, measured limitations and rejected v0.6 changes.
+
 ## [0.5.9.1-rebuild] — 2026-09-08
 
 ### Fixed

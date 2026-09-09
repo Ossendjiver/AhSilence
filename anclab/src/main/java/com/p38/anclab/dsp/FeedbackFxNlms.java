@@ -39,6 +39,7 @@ public final class FeedbackFxNlms {
     private int runawayCounter=0,safetyTrips=0;
     private float ceilingOccupancy=0f;
     private boolean latchedOff=false;
+    private volatile boolean evaluationMuted=false;
     private volatile String safetyStatus="";
     private float inRms=0f,outRms=0f,modelOutRms=0f;
 
@@ -59,6 +60,7 @@ public final class FeedbackFxNlms {
     public void setRouteGainCompensation(float v){routeGainCompensation=clamp(v,0f,4f);}
     public void setExcludedFrequencies(double[] frequenciesHz){predictableExcluder.setFrequencies(frequenciesHz);}
     public void notifyRouteGainChanged(){safetyHoldSamples=Math.max(safetyHoldSamples,(int)(0.35f*SAMPLE_RATE));safetyStatus="Media volume changed · vehicle broadband briefly ramped down";}
+    public void setEvaluationMuted(boolean muted){evaluationMuted=muted;}
 
     public void reset(){
         Arrays.fill(w,0f);Arrays.fill(xHist,0f);Arrays.fill(xfHist,0f);Arrays.fill(yDelay,0f);Arrays.fill(refDelay,0f);
@@ -96,12 +98,13 @@ public final class FeedbackFxNlms {
         float raw=dotCircular(w,xHist,xPos);
         float modelDrive=outputLowPass.process(clamp(raw,-modelCeiling,modelCeiling));
         modelDrive=clamp(modelDrive,-modelCeiling,modelCeiling)*safetyRamp;
+        if(evaluationMuted)modelDrive=0f;
         float transportDrive=clamp(modelDrive*routeGainCompensation,-0.5f,0.5f);
         yDelay[yPos]=modelDrive;
 
         refDelay[refPos]=filteredXPathLowPass.process(reference);
         float xf=convolveDelayedReference();xfHist[xfPos]=xf;
-        boolean adapt=safetyHoldSamples<=0&&safetyRamp>0.95f&&userOutputScale>0f;
+        boolean adapt=!evaluationMuted&&safetyHoldSamples<=0&&safetyRamp>0.95f&&userOutputScale>0f;
         if(adapt){
             float norm=1e-5f;for(float v:xfHist)norm+=v*v;
             float step=mu*error/norm;

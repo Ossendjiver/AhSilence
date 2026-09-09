@@ -11,6 +11,7 @@ import org.json.JSONObject;
  * at calibration so runtime anti-noise can be normalised against later music-volume changes.
  */
 public final class HeadphoneCalibration {
+    public static final float MATERIAL_DELAY_DIFFERENCE_MS = 5.0f;
     public int sampleRateHz = 48000;
     public int inputDeviceId = 0;
     public int outputDeviceId = 0;
@@ -18,6 +19,11 @@ public final class HeadphoneCalibration {
     public String outputRoute = "";
     public String profileId = "headphones";
     public int delaySamples = 0;
+    // Independent repeat measurements. Negative values identify legacy single-pass profiles.
+    public int delayCheckOneSamples = -1;
+    public int delayCheckTwoSamples = -1;
+    public float delayCheckOneQuality = Float.NaN;
+    public float delayCheckTwoQuality = Float.NaN;
     public float quality = 0f;
     public long utcMs = 0L;
     public float[] secondaryPath = new float[0];
@@ -32,12 +38,30 @@ public final class HeadphoneCalibration {
     public float mediaVolumeDb = Float.NaN;
 
     public float delayMs() { return sampleRateHz <= 0 ? 0f : delaySamples * 1000f / sampleRateHz; }
+    public boolean hasDelayStabilityMeasurement() {
+        return sampleRateHz > 0 && delayCheckOneSamples >= 0 && delayCheckTwoSamples >= 0;
+    }
+    public float delayCheckOneMs() { return sampleRateHz <= 0 || delayCheckOneSamples < 0 ? Float.NaN : delayCheckOneSamples * 1000f / sampleRateHz; }
+    public float delayCheckTwoMs() { return sampleRateHz <= 0 || delayCheckTwoSamples < 0 ? Float.NaN : delayCheckTwoSamples * 1000f / sampleRateHz; }
+    public float delayDifferenceMs() {
+        return hasDelayStabilityMeasurement()
+                ? Math.abs(delayCheckOneSamples - delayCheckTwoSamples) * 1000f / sampleRateHz
+                : Float.NaN;
+    }
+    public boolean latencyIsStable() {
+        return !hasDelayStabilityMeasurement() || delayDifferenceMs() <= MATERIAL_DELAY_DIFFERENCE_MS;
+    }
+    /** Longest observed route delay gives controller A/B windows time to become acoustically clean. */
+    public float conservativeDelayMs() {
+        if (!hasDelayStabilityMeasurement()) return delayMs();
+        return Math.max(delayCheckOneSamples, delayCheckTwoSamples) * 1000f / sampleRateHz;
+    }
     public boolean hasMediaVolumeReference() { return Float.isFinite(mediaVolumeDb) && mediaVolumeIndex >= 0; }
 
     public JSONObject toJson() {
         JSONObject o = new JSONObject();
         try {
-            o.put("format", "anc-lab-route-calibration-v3");
+            o.put("format", "anc-lab-route-calibration-v4");
             o.put("sampleRateHz", sampleRateHz);
             o.put("inputDeviceId", inputDeviceId);
             o.put("outputDeviceId", outputDeviceId);
@@ -46,6 +70,11 @@ public final class HeadphoneCalibration {
             o.put("profileId", profileId);
             o.put("delaySamples", delaySamples);
             o.put("delayMs", delayMs());
+            if (delayCheckOneSamples >= 0) o.put("delayCheckOneSamples", delayCheckOneSamples);
+            if (delayCheckTwoSamples >= 0) o.put("delayCheckTwoSamples", delayCheckTwoSamples);
+            if (Float.isFinite(delayCheckOneQuality)) o.put("delayCheckOneQuality", delayCheckOneQuality);
+            if (Float.isFinite(delayCheckTwoQuality)) o.put("delayCheckTwoQuality", delayCheckTwoQuality);
+            if (hasDelayStabilityMeasurement()) o.put("delayDifferenceMs", delayDifferenceMs());
             o.put("quality", quality);
             o.put("utcMs", utcMs);
             o.put("safeOutputCeiling", safeOutputCeiling);
@@ -74,6 +103,10 @@ public final class HeadphoneCalibration {
             c.outputRoute = o.optString("outputRoute", "");
             c.profileId = o.optString("profileId", "headphones");
             c.delaySamples = o.optInt("delaySamples", 0);
+            c.delayCheckOneSamples = o.optInt("delayCheckOneSamples", -1);
+            c.delayCheckTwoSamples = o.optInt("delayCheckTwoSamples", -1);
+            c.delayCheckOneQuality = o.has("delayCheckOneQuality") ? (float)o.optDouble("delayCheckOneQuality", Double.NaN) : Float.NaN;
+            c.delayCheckTwoQuality = o.has("delayCheckTwoQuality") ? (float)o.optDouble("delayCheckTwoQuality", Double.NaN) : Float.NaN;
             c.quality = (float)o.optDouble("quality", 0.0);
             c.utcMs = o.optLong("utcMs", 0L);
             c.safeOutputCeiling = (float)o.optDouble("safeOutputCeiling", 0.22);

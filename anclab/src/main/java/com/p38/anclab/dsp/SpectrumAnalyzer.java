@@ -12,12 +12,20 @@ public final class SpectrumAnalyzer {
     public static SpectrumSnapshot analyze(float[] samples,long firstSampleIndex,double sampleRateHz,
             double minimumHz,double maximumHz,double targetHz,long referenceEpochIndex) {
         return analyze(samples, firstSampleIndex, sampleRateHz, minimumHz, maximumHz, targetHz,
-                referenceEpochIndex, 0.0);
+                referenceEpochIndex, 0.0, FrequencyResponse.FLAT);
     }
 
     public static SpectrumSnapshot analyze(float[] samples,long firstSampleIndex,double sampleRateHz,
             double minimumHz,double maximumHz,double targetHz,long referenceEpochIndex,
             double referencePhaseRadians) {
+        return analyze(samples,firstSampleIndex,sampleRateHz,minimumHz,maximumHz,targetHz,
+                referenceEpochIndex,referencePhaseRadians,FrequencyResponse.FLAT);
+    }
+
+    public static SpectrumSnapshot analyze(float[] samples,long firstSampleIndex,double sampleRateHz,
+            double minimumHz,double maximumHz,double targetHz,long referenceEpochIndex,
+            double referencePhaseRadians,FrequencyResponse response) {
+        if(response==null)response=FrequencyResponse.FLAT;
         if (samples.length < 32) {
             return new SpectrumSnapshot(0,0,-120,0,targetHz,Complex.ZERO,-120,-120,samples.length/sampleRateHz);
         }
@@ -28,7 +36,7 @@ public final class SpectrumAnalyzer {
         for(int i=0;i<bins;i++){
             double frequency=minimumHz+i*stepHz;
             amplitudes[i]=coefficient(samples,firstSampleIndex,sampleRateHz,frequency,
-                    referenceEpochIndex,referencePhaseRadians,0,samples.length).magnitude();
+                    referenceEpochIndex,referencePhaseRadians,0,samples.length).magnitude()*response.amplitudeScale(frequency);
             if(amplitudes[i]>amplitudes[bestIndex])bestIndex=i;
         }
         double peakFrequency=minimumHz+bestIndex*stepHz;
@@ -46,10 +54,14 @@ public final class SpectrumAnalyzer {
         double median=sorted[sorted.length/2];
         double peakAmplitude=amplitudes[bestIndex];
         double contrastDb=linearToDb(peakAmplitude/Math.max(median,EPSILON));
-        int targetLength=Math.min(samples.length,Math.max(64,(int)Math.round(sampleRateHz*0.75)));
+        // Six coherent cycles are enough for a stable phasor while allowing high-order tones to
+        // calibrate promptly. Keep a 300 ms floor for rejection of broadband fluctuations and a
+        // 750 ms ceiling so the 8 Hz lower limit remains responsive.
+        double targetSeconds=Math.max(0.30,Math.min(0.75,6.0/Math.max(8.0,targetHz)));
+        int targetLength=Math.min(samples.length,Math.max(64,(int)Math.round(sampleRateHz*targetSeconds)));
         int targetOffset=samples.length-targetLength;
         Complex target=coefficient(samples,firstSampleIndex,sampleRateHz,targetHz,
-                referenceEpochIndex,referencePhaseRadians,targetOffset,targetLength);
+                referenceEpochIndex,referencePhaseRadians,targetOffset,targetLength).multiply(response.amplitudeScale(targetHz));
         double sumSquares=0.0;for(float sample:samples)sumSquares+=sample*sample;
         double rms=Math.sqrt(sumSquares/samples.length);
         return new SpectrumSnapshot(peakFrequency,peakAmplitude,linearToDb(peakAmplitude),contrastDb,
@@ -71,16 +83,33 @@ public final class SpectrumAnalyzer {
         return new Complex(sumReal*scale,sumImaginary*scale);
     }
 
-    public static double linearToDb(double value){return 20.0*Math.log10(Math.max(Math.abs(value),1.0e-6));}
-    public record DetectedTone(double frequencyHz,double amplitude,double dbFs) { }
+    public static double linearToDb(double value){return 20.0*Math.log10(Math.max(Math.abs(value),1.0e-12));}
+    public record DetectedTone(double frequencyHz,double amplitude,double dbFs,
+                               double localFloorDbFs,double prominenceDb) {
+        public DetectedTone(double frequencyHz,double amplitude,double dbFs){
+            this(frequencyHz,amplitude,dbFs,-120.0,Math.max(0.0,dbFs+120.0));
+        }
+    }
 
     public static List<DetectedTone> findPeaks(float[] samples,long firstSampleIndex,double sampleRateHz,
             double minimumHz,double maximumHz,int maximumPeaks,double minimumSeparationHz){
+        return findPeaks(samples,firstSampleIndex,sampleRateHz,minimumHz,maximumHz,maximumPeaks,
+                minimumSeparationHz,FrequencyResponse.FLAT);
+    }
+
+    public static List<DetectedTone> findPeaks(float[] samples,long firstSampleIndex,double sampleRateHz,
+            double minimumHz,double maximumHz,int maximumPeaks,double minimumSeparationHz,
+            FrequencyResponse response){
         if(samples.length<64||maximumPeaks<=0)return List.of();
+        if(response==null)response=FrequencyResponse.FLAT;
         List<DetectedTone> candidates=new ArrayList<>();
         for(Radix2Spectrum.Peak peak:Radix2Spectrum.findPeaks(samples,sampleRateHz,minimumHz,maximumHz,
-                Math.max(maximumPeaks*3,maximumPeaks),minimumSeparationHz))
-            candidates.add(new DetectedTone(peak.frequencyHz(),peak.amplitude(),linearToDb(peak.amplitude())));
+                Math.max(maximumPeaks*3,maximumPeaks),minimumSeparationHz)){
+            double scale=response.amplitudeScale(peak.frequencyHz());double amplitude=peak.amplitude()*scale;
+            double floor=peak.noiseFloorAmplitude()*scale;
+            candidates.add(new DetectedTone(peak.frequencyHz(),amplitude,linearToDb(amplitude),
+                    linearToDb(floor),peak.prominenceDb()));
+        }
         List<DetectedTone> selected=new ArrayList<>();
         for(DetectedTone candidate:candidates){
             boolean separated=true;

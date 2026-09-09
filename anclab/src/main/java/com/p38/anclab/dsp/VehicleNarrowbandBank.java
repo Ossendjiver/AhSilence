@@ -37,11 +37,18 @@ public final class VehicleNarrowbandBank {
     private static final int ANALYSIS_INTERVAL_SAMPLES=50; // 100 ms
     private static final double TWO_PI=Math.PI*2.0;
     private static final double SEARCH_HALF_WIDTH_HZ=1.20;
+    private static final double MECHANICAL_CONFIRMATION_RADIUS_HZ=0.85;
+    private static final double MECHANICAL_MIN_PROMINENCE_DB=5.0;
+    private static final double MECHANICAL_MIN_LEVEL_DBFS=-78.0;
+    private static final int MECHANICAL_CONFIRMATION_SCANS=3;
+    private static final double LOW_FREQUENCY_GAIN_MULTIPLIER=0.35;
 
     private static final int DISCOVERY_SCAN_EVERY_ANALYSES=5; // ~2 scans/s
     private static final int MAX_DISCOVERED_LANES_BROADBAND=6;
     private static final int MAX_DISCOVERED_LANES_NARROWBAND_ONLY=10;
-    private static final double DISCOVERY_ADMISSION_FLOOR_DBFS=-62.0;
+    private static final double DISCOVERY_STRONG_FLOOR_DBFS=-62.0;
+    private static final double DISCOVERY_QUIET_FLOOR_DBFS=-82.0;
+    private static final double DISCOVERY_MIN_PROMINENCE_DB=10.0;
     private static final double DISCOVERY_REPLACEMENT_MARGIN_DB=6.0;
     private static final double DISCOVERY_SEARCH_HALF_WIDTH_HZ=0.85;
     private static final double DISCOVERY_TRACK_HALF_WIDTH_HZ=0.70;
@@ -51,6 +58,10 @@ public final class VehicleNarrowbandBank {
     private static final long DISCOVERY_INACTIVE_STALE_MS=8000;
     private static final int RECIPE_SUCCESS_UPDATES=12;
     private static final long RECIPE_SAVE_INTERVAL_MS=30000;
+    // Independent sinusoidal lanes add approximately by RMS, not as a permanently in-phase sum.
+    // Preserve headroom for changing phases while avoiding the old 1/N split that made every
+    // probe inaudibly small when the complete P38 order set was enabled.
+    private static final double MULTITONE_RMS_BUDGET=0.72;
 
     private final ButterworthLowPass analysisLowPass=new ButterworthLowPass(SAMPLE_RATE,210.0);
     private final DcBlocker analysisDc=new DcBlocker(Math.exp(-2.0*Math.PI*3.0/SAMPLE_RATE));
@@ -63,6 +74,8 @@ public final class VehicleNarrowbandBank {
     private final String routeKey;
     private final double cancellationMinimumHz;
     private final double cancellationMaximumHz;
+    private final double outputLatencyMs;
+    private final FrequencyResponse microphoneResponse;
 
     private int ringPos=0,ringCount=0,decimator=0,sinceAnalysis=0,discoveryAnalysisCounter=0;
     private long totalAnalysisSamples=0;
@@ -74,18 +87,38 @@ public final class VehicleNarrowbandBank {
     private volatile long frequencyRevision=0L;
     private boolean fallbackMode=false;
     private boolean broadbandEnabled=false;
+    private volatile boolean externalEvaluationMuted=false;
+    private volatile long externalEvaluationChangedMs=0L;
 
     public VehicleNarrowbandBank(List<MechanicalFrequency> models,VehicleTelemetryRuntime telemetry,
                                  float safeOutputCeiling,float userScale){
         this(models,telemetry,safeOutputCeiling,userScale,
                 FrequencyLanePolicy.DEFAULT_CANCELLATION_MINIMUM_HZ,
-                FrequencyLanePolicy.MONITOR_MAXIMUM_HZ,"",List.of());
+                FrequencyLanePolicy.MONITOR_MAXIMUM_HZ,"",List.of(),0.0);
     }
 
     public VehicleNarrowbandBank(List<MechanicalFrequency> models,VehicleTelemetryRuntime telemetry,
                                  float safeOutputCeiling,float userScale,
                                  double cancellationMinimumHz,double cancellationMaximumHz,
                                  String routeKey,List<VehicleCancellationRecipe> recipes){
+        this(models,telemetry,safeOutputCeiling,userScale,cancellationMinimumHz,
+                cancellationMaximumHz,routeKey,recipes,0.0);
+    }
+
+    public VehicleNarrowbandBank(List<MechanicalFrequency> models,VehicleTelemetryRuntime telemetry,
+                                 float safeOutputCeiling,float userScale,
+                                 double cancellationMinimumHz,double cancellationMaximumHz,
+                                 String routeKey,List<VehicleCancellationRecipe> recipes,
+                                 double outputLatencyMs){
+        this(models,telemetry,safeOutputCeiling,userScale,cancellationMinimumHz,cancellationMaximumHz,
+                routeKey,recipes,outputLatencyMs,FrequencyResponse.FLAT);
+    }
+
+    public VehicleNarrowbandBank(List<MechanicalFrequency> models,VehicleTelemetryRuntime telemetry,
+                                 float safeOutputCeiling,float userScale,
+                                 double cancellationMinimumHz,double cancellationMaximumHz,
+                                 String routeKey,List<VehicleCancellationRecipe> recipes,
+                                 double outputLatencyMs,FrequencyResponse microphoneResponse){
         this.telemetry=telemetry;
         totalCeiling=clamp(Math.abs(safeOutputCeiling),0.005f,0.15f);
         this.userScale=clamp(userScale,0f,1f);
@@ -94,6 +127,8 @@ public final class VehicleNarrowbandBank {
         this.cancellationMaximumHz=Math.max(this.cancellationMinimumHz,
                 Math.min(FrequencyLanePolicy.MONITOR_MAXIMUM_HZ,cancellationMaximumHz));
         this.routeKey=routeKey==null?"":routeKey;
+        this.outputLatencyMs=Double.isFinite(outputLatencyMs)?Math.max(0.0,outputLatencyMs):0.0;
+        this.microphoneResponse=microphoneResponse==null?FrequencyResponse.FLAT:microphoneResponse;
         recipeBook=new VehicleRecipeBook(recipes);
         rebuild(models,System.currentTimeMillis());
     }
@@ -119,6 +154,7 @@ public final class VehicleNarrowbandBank {
         redistributeLimits();
         publishLaneRegistry();
     }
+    public void setExternalEvaluationMuted(boolean muted){externalEvaluationMuted=muted;externalEvaluationChangedMs=System.currentTimeMillis();}
     public float outputRms(){return(float)Math.sqrt(Math.max(0f,outRms));}
     public String status(){return status;}
     public synchronized int activeLaneCount(){int n=0;for(Lane l:lanes)if(l.available&&l.controller.output().gain()>1e-5)n++;for(DiscoveredLane l:discovered)if(l.controller.output().gain()>1e-5)n++;return n;}
@@ -143,7 +179,9 @@ public final class VehicleNarrowbandBank {
         clearDiscovered(false);
         for(Lane l:lanes){
             l.referenceEpoch=totalAnalysisSamples;l.referencePhase=l.oscillator.phase;l.tracker.reset(l.currentFrequencyHz,now);
-            if(l.available&&l.cancellable){startTelemetryController(l,now);l.controllerEnabled=true;}else l.controller.stop();
+            // Telemetry is only a search hint. Every mechanical lane starts muted and must be
+            // independently confirmed as a narrow microphone line before a probe may be emitted.
+            l.controller.stop();l.controllerEnabled=false;l.acousticConfirmations=0;
         }
         redistributeLimits();
         frequencyRevision++;
@@ -155,8 +193,14 @@ public final class VehicleNarrowbandBank {
         int n=0;for(DiscoveredLane l:discovered)if(l.cancellable)n++;
         for(Lane l:lanes)if(l.controllerEnabled)n++;return Math.max(1,n);
     }
-    private synchronized void redistributeLimits(){double each=perLaneLimit();for(Lane l:lanes)l.controller.setMaximumGain(each);for(DiscoveredLane l:discovered)l.controller.setMaximumGain(each);}
-    private synchronized double perLaneLimit(){return Math.max(0.0001,totalCeiling*Math.max(0.02f,userScale)/effectiveLaneCount());}
+    private synchronized void redistributeLimits(){for(Lane l:lanes)l.controller.setMaximumGain(perLaneLimit(l.currentFrequencyHz));for(DiscoveredLane l:discovered)l.controller.setMaximumGain(perLaneLimit(l.currentFrequencyHz));}
+    private synchronized double perLaneLimit(){return perLaneGainLimit(totalCeiling,userScale,effectiveLaneCount());}
+    private synchronized double perLaneLimit(double frequencyHz){double base=perLaneLimit();return frequencyHz>=20.0&&frequencyHz<=40.0?base*LOW_FREQUENCY_GAIN_MULTIPLIER:base;}
+    static double perLaneGainLimit(float totalCeiling,float userScale,int laneCount){
+        int n=Math.max(1,laneCount);
+        double scale=n==1?1.0:MULTITONE_RMS_BUDGET/Math.sqrt(n);
+        return Math.max(0.0001,Math.abs(totalCeiling)*Math.max(0.02f,userScale)*scale);
+    }
 
     /** Returns model-domain narrowband anti-noise for one 48 kHz microphone sample. */
     public float process(float microphone){
@@ -182,7 +226,7 @@ public final class VehicleNarrowbandBank {
             }
         }
         float ceiling=totalCeiling*userScale;
-        float out=clamp((float)value,-ceiling,ceiling);
+        float out=externalEvaluationMuted?0f:clamp((float)value,-ceiling,ceiling);
         outRms=0.995f*outRms+0.005f*out*out;
         return out;
     }
@@ -227,21 +271,17 @@ public final class VehicleNarrowbandBank {
         }
 
         for(Lane l:lanes){
-            boolean shouldRun=l.available&&l.cancellable&&!l.suppressed;
-            if(shouldRun&&!l.controllerEnabled){
-                l.currentFrequencyHz=l.predictedFrequencyHz;l.tracker.reset(l.currentFrequencyHz,now);
-                l.referenceEpoch=totalAnalysisSamples;l.referencePhase=l.oscillator.phase;
-                startTelemetryController(l,now);l.controllerEnabled=true;moved=true;availabilityChanged=true;
-            }else if(!shouldRun&&l.controllerEnabled){
-                l.controller.stop();l.controllerEnabled=false;l.successUpdates=0;moved=true;availabilityChanged=true;
-            }
+            boolean eligible=l.available&&l.cancellable&&!l.suppressed;
+            if(!eligible&&l.controllerEnabled){l.controller.stop();l.controllerEnabled=false;l.successUpdates=0;l.acousticConfirmations=0;moved=true;availabilityChanged=true;}
             if(!l.available)continue;
-            available++;if(shouldRun)controllable++;else monitorOnly++;
+            available++;
 
             double predicted=l.predictedFrequencyHz;
             double lo=Math.max(8.0,predicted-SEARCH_HALF_WIDTH_HZ),hi=Math.min(200.0,predicted+SEARCH_HALF_WIDTH_HZ);
-            SpectrumSnapshot search=SpectrumAnalyzer.analyze(window,first,ANALYSIS_RATE,lo,hi,predicted,l.referenceEpoch,l.referencePhase);
-            boolean acousticLock=search.peakDbFs()>-78.0&&search.contrastDb()>2.2&&Math.abs(search.peakFrequencyHz()-predicted)<=SEARCH_HALF_WIDTH_HZ;
+            SpectrumSnapshot search=SpectrumAnalyzer.analyze(window,first,ANALYSIS_RATE,lo,hi,predicted,l.referenceEpoch,l.referencePhase,microphoneResponse);
+            boolean acousticLock=search.peakDbFs()>MECHANICAL_MIN_LEVEL_DBFS
+                    &&search.contrastDb()>MECHANICAL_MIN_PROMINENCE_DB
+                    &&Math.abs(search.peakFrequencyHz()-predicted)<=MECHANICAL_CONFIRMATION_RADIUS_HZ;
             double refined=predicted;
             double trackingRadius=FrequencyLanePolicy.telemetryTrackingRadius(predicted);
             l.tracker.setBounds(Math.max(8.0,predicted-trackingRadius),
@@ -255,21 +295,36 @@ public final class VehicleNarrowbandBank {
             }
             refined=Math.max(8.0,Math.min(200.0,refined));
             if(Math.abs(refined-l.currentFrequencyHz)>0.025){l.currentFrequencyHz=refined;moved=true;}
+            if(!l.controllerEnabled){
+                boolean retryReady=l.idleSinceMs==0||now-l.idleSinceMs>=FrequencyLanePolicy.CONTROLLER_RETRY_DELAY_MS;
+                if(acousticLock&&retryReady)l.acousticConfirmations=Math.min(MECHANICAL_CONFIRMATION_SCANS,l.acousticConfirmations+1);
+                else l.acousticConfirmations=0;
+            }
+            boolean shouldRun=eligible&&l.acousticConfirmations>=MECHANICAL_CONFIRMATION_SCANS;
+            if(shouldRun&&!l.controllerEnabled){
+                l.currentFrequencyHz=refined;l.referenceEpoch=totalAnalysisSamples;l.referencePhase=l.oscillator.phase;
+                startTelemetryController(l,now);l.controllerEnabled=true;moved=true;availabilityChanged=true;
+            }
             if(shouldRun&&collidesWithEarlierTelemetryLane(l)){
                 l.suppressed=true;l.controller.stop();l.controllerEnabled=false;l.successUpdates=0;
-                shouldRun=false;controllable--;monitorOnly++;availabilityChanged=true;moved=true;
+                l.acousticConfirmations=0;shouldRun=false;availabilityChanged=true;moved=true;
             }
+            if(shouldRun)controllable++;else monitorOnly++;
             if(!shouldRun)continue;
+            l.controller.setMaximumGain(perLaneLimit(refined));
+            if(externalEvaluationMuted||now-externalEvaluationChangedMs<Math.max(1000L,Math.round(outputLatencyMs)+850L))continue;
             if("IDLE".equals(l.controller.stageName())){
-                if(l.idleSinceMs==0)l.idleSinceMs=now;
-                if(FrequencyLanePolicy.controllerRetryDue(l.controller.stageName(),l.idleSinceMs,now))
-                    startTelemetryController(l,now);
+                // A rejected mechanical target must earn a new microphone confirmation before it
+                // can probe again; telemetry alone can never restart output.
+                l.controllerEnabled=false;l.acousticConfirmations=0;l.successUpdates=0;
+                l.idleSinceMs=now;availabilityChanged=true;moved=true;controllable--;monitorOnly++;
+                continue;
             }else l.idleSinceMs=0;
             l.controller.followFrequency(refined,now);
 
             double controlled=l.controller.output().frequencyHz();
             SpectrumSnapshot exact=SpectrumAnalyzer.analyze(window,first,ANALYSIS_RATE,
-                    Math.max(8.0,controlled-0.15),Math.min(200.0,controlled+0.15),controlled,l.referenceEpoch,l.referencePhase);
+                    Math.max(8.0,controlled-0.15),Math.min(200.0,controlled+0.15),controlled,l.referenceEpoch,l.referencePhase,microphoneResponse);
             l.controller.update(exact,now);
             if(l.controller.output().gain()>1e-5)cancelling++;
             maybeCaptureRecipe(l,now);
@@ -311,11 +366,14 @@ public final class VehicleNarrowbandBank {
         if(++discoveryAnalysisCounter>=DISCOVERY_SCAN_EVERY_ANALYSES){
             discoveryAnalysisCounter=0;
             List<SpectrumAnalyzer.DetectedTone> peaks=SpectrumAnalyzer.findPeaks(window,first,ANALYSIS_RATE,
-                    8.0,200.0,12,DISCOVERY_MIN_SEPARATION_HZ);
+                    8.0,200.0,12,DISCOVERY_MIN_SEPARATION_HZ,microphoneResponse);
             List<BroadbandDetector.Candidate> ready=new ArrayList<>(discoveryDetector.update(peaks,now));
-            ready.sort(Comparator.comparingDouble(BroadbandDetector.Candidate::dbFs).reversed());
+            ready.sort(Comparator.comparingDouble(BroadbandDetector.Candidate::score).reversed());
             for(BroadbandDetector.Candidate candidate:ready){
-                if(candidate.dbFs()<DISCOVERY_ADMISSION_FLOOR_DBFS)continue;
+                boolean strong=candidate.dbFs()>=DISCOVERY_STRONG_FLOOR_DBFS;
+                boolean locallyClear=candidate.dbFs()>=DISCOVERY_QUIET_FLOOR_DBFS
+                        &&candidate.prominenceDb()>=DISCOVERY_MIN_PROMINENCE_DB;
+                if(!strong&&!locallyClear)continue;
                 if(nearOwnedFrequency(candidate.frequencyHz()))continue;
                 DiscoveredLane replace=null;
                 int controllerSlots=discoveredControllerSlotCount();
@@ -343,8 +401,9 @@ public final class VehicleNarrowbandBank {
             double centre=l.currentFrequencyHz;
             SpectrumSnapshot search=SpectrumAnalyzer.analyze(window,first,ANALYSIS_RATE,
                     Math.max(8.0,centre-DISCOVERY_SEARCH_HALF_WIDTH_HZ),
-                    Math.min(200.0,centre+DISCOVERY_SEARCH_HALF_WIDTH_HZ),centre,l.referenceEpoch,l.referencePhase);
-            boolean lock=search.peakDbFs()>-76.0&&search.contrastDb()>2.0&&Math.abs(search.peakFrequencyHz()-centre)<=DISCOVERY_SEARCH_HALF_WIDTH_HZ;
+                    Math.min(200.0,centre+DISCOVERY_SEARCH_HALF_WIDTH_HZ),centre,l.referenceEpoch,l.referencePhase,microphoneResponse);
+            boolean lock=search.peakDbFs()>-84.0&&search.contrastDb()>1.8
+                    &&Math.abs(search.peakFrequencyHz()-centre)<=DISCOVERY_SEARCH_HALF_WIDTH_HZ;
             double refined=centre;
             if(lock){
                 refined=l.tracker.update(search.peakFrequencyHz(),now);
@@ -356,6 +415,10 @@ public final class VehicleNarrowbandBank {
 
             double gain=0.0;
             if(l.cancellable){
+                if(externalEvaluationMuted||now-externalEvaluationChangedMs<Math.max(1000L,Math.round(outputLatencyMs)+850L)){
+                    if(l.controller.output().gain()>1e-5)cancelling++;
+                    continue;
+                }
                 if("IDLE".equals(l.controller.stageName())){
                     if(l.idleSinceMs==0)l.idleSinceMs=now;
                     if(FrequencyLanePolicy.controllerRetryDue(l.controller.stageName(),l.idleSinceMs,now))
@@ -363,7 +426,7 @@ public final class VehicleNarrowbandBank {
                 }else l.idleSinceMs=0;
                 double controlled=l.controller.output().frequencyHz();
                 SpectrumSnapshot exact=SpectrumAnalyzer.analyze(window,first,ANALYSIS_RATE,
-                        Math.max(8.0,controlled-0.15),Math.min(200.0,controlled+0.15),controlled,l.referenceEpoch,l.referencePhase);
+                        Math.max(8.0,controlled-0.15),Math.min(200.0,controlled+0.15),controlled,l.referenceEpoch,l.referencePhase,microphoneResponse);
                 l.controller.update(exact,now);gain=l.controller.output().gain();maybeCaptureRecipe(l,now);
             }
             if(gain>1e-5)cancelling++;
@@ -432,20 +495,22 @@ public final class VehicleNarrowbandBank {
     }
 
     private void startTelemetryController(Lane lane,long now){
+        lane.controller.setOutputLatencyMs(outputLatencyMs);
         double source=telemetry==null?Double.NaN:telemetry.sourceValue(lane.model);
         VehicleCancellationRecipe recipe=recipeBook.find(routeKey,lane.model.id(),
                 lane.model.detectedNumberType(),source,lane.currentFrequencyHz);
-        if(recipe==null)lane.controller.startTracking(now,perLaneLimit(),lane.currentFrequencyHz,lane.label,true);
-        else lane.controller.startTrackingWithSecondaryPath(now,perLaneLimit(),lane.currentFrequencyHz,
+        if(recipe==null)lane.controller.startTracking(now,perLaneLimit(lane.currentFrequencyHz),lane.currentFrequencyHz,lane.label,true);
+        else lane.controller.startTrackingWithSecondaryPath(now,perLaneLimit(lane.currentFrequencyHz),lane.currentFrequencyHz,
                 lane.label,true,recipe.secondaryPath());
         lane.idleSinceMs=0;lane.successUpdates=0;
     }
 
     private void startDiscoveredController(DiscoveredLane lane,long now){
+        lane.controller.setOutputLatencyMs(outputLatencyMs);
         VehicleCancellationRecipe recipe=recipeBook.find(routeKey,"discovered",
                 MechanicalFrequency.SourceType.FIXED,lane.anchorFrequencyHz,lane.currentFrequencyHz);
-        if(recipe==null)lane.controller.startTracking(now,perLaneLimit(),lane.currentFrequencyHz,lane.label,false);
-        else lane.controller.startTrackingWithSecondaryPath(now,perLaneLimit(),lane.currentFrequencyHz,
+        if(recipe==null)lane.controller.startTracking(now,perLaneLimit(lane.currentFrequencyHz),lane.currentFrequencyHz,lane.label,false);
+        else lane.controller.startTrackingWithSecondaryPath(now,perLaneLimit(lane.currentFrequencyHz),lane.currentFrequencyHz,
                 lane.label,false,recipe.secondaryPath());
         lane.idleSinceMs=0;lane.successUpdates=0;
     }
@@ -519,7 +584,7 @@ public final class VehicleNarrowbandBank {
     private float[] copyRing(){float[] out=new float[ringCount];int start=ringPos-ringCount;if(start<0)start+=ring.length;for(int i=0;i<ringCount;i++)out[i]=ring[(start+i)%ring.length];return out;}
 
     private static final class Lane {
-        final MechanicalFrequency model;final String label;final AutoController controller=new AutoController();final AdaptiveFrequencyTracker tracker=new AdaptiveFrequencyTracker();final Oscillator oscillator=new Oscillator();long referenceEpoch;double referencePhase;double currentFrequencyHz,predictedFrequencyHz;boolean available,cancellable,suppressed,controllerEnabled;int successUpdates;long lastRecipeMs,idleSinceMs;
+        final MechanicalFrequency model;final String label;final AutoController controller=new AutoController();final AdaptiveFrequencyTracker tracker=new AdaptiveFrequencyTracker();final Oscillator oscillator=new Oscillator();long referenceEpoch;double referencePhase;double currentFrequencyHz,predictedFrequencyHz;boolean available,cancellable,suppressed,controllerEnabled;int acousticConfirmations,successUpdates;long lastRecipeMs,idleSinceMs;
         Lane(MechanicalFrequency model,double f){this.model=model;label=model.name();currentFrequencyHz=f;oscillator.frequencyHz=f;oscillator.targetFrequencyHz=f;}
     }
     private static final class DiscoveredLane {
