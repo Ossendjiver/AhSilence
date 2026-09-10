@@ -14,12 +14,15 @@ import android.media.MediaRecorder;
 import android.os.Build;
 
 import com.p38.anclab.dsp.FeedbackFxNlms;
+import com.p38.anclab.dsp.Complex;
 import com.p38.anclab.dsp.HeadphoneFeedforwardFxNlms;
 import com.p38.anclab.dsp.PredictableFrequencyExcluder;
+import com.p38.anclab.dsp.SpectrumAnalyzer;
 import com.p38.anclab.dsp.VehicleNarrowbandBank;
 import com.p38.anclab.dsp.VehicleLaneRegistry;
 import com.p38.anclab.profile.HeadphoneCalibration;
 import com.p38.anclab.profile.MechanicalFrequency;
+import com.p38.anclab.profile.OutputCapability;
 import com.p38.anclab.profile.ProfileStore;
 import com.p38.anclab.profile.VehicleCancellationRecipe;
 import com.p38.anclab.recording.AppLog;
@@ -68,7 +71,11 @@ public final class AudioEngine {
     private String inputRoute="System default",outputRoute="System default";
     private volatile String resolvedInputRoute="System default (unresolved)";
     private volatile String inputCalibrationKey="input-unresolved";
+    private volatile String resolvedOutputRoute="System default (unresolved)";
+    private volatile String outputCapabilityKey="output-unresolved";
     private volatile MicCalibration microphoneCalibration;
+    private volatile OutputCapability outputCapability;
+    private volatile String outputSweepStatus="No output capability sweep";
     private HeadphoneCalibration calibration;
     private HeadphoneFeedforwardFxNlms headphoneFx;
     private FeedbackFxNlms vehicleFx;
@@ -112,6 +119,10 @@ public final class AudioEngine {
         public final boolean success; public final HeadphoneCalibration calibration; public final String message;
         public CalibrationResult(boolean s,HeadphoneCalibration c,String m){success=s;calibration=c;message=m;}
     }
+    public static final class OutputSweepResult {
+        public final boolean success; public final OutputCapability capability; public final String message;
+        OutputSweepResult(boolean success,OutputCapability capability,String message){this.success=success;this.capability=capability;this.message=message;}
+    }
     public static final class GraphSnapshot {
         public final float[] reference,drive,predictedCancellation,predictedResidual;
         public final float sampleRateHz; public final boolean running;
@@ -131,12 +142,17 @@ public final class AudioEngine {
     public List<DeviceChoice> listInputDevices(){return listDevices(AudioManager.GET_DEVICES_INPUTS);}
     public List<DeviceChoice> listOutputDevices(){return listDevices(AudioManager.GET_DEVICES_OUTPUTS);}
     private List<DeviceChoice> listDevices(int flag){List<DeviceChoice> out=new ArrayList<>();out.add(new DeviceChoice(0,"System default",null));for(AudioDeviceInfo d:audioManager.getDevices(flag))out.add(new DeviceChoice(d.getId(),typeName(d)+" · "+d.getProductName(),d));return out;}
-    public void setPreferredInput(DeviceChoice d){inputDeviceId=d==null?0:d.id;inputRoute=d==null?"System default":d.name;inputCalibrationKey=d==null||d.info==null?"input-unresolved":d.calibrationKey;resolvedInputRoute=d==null||d.info==null?"System default (unresolved)":d.name;applyStoredMicrophoneCalibration();}
-    public void setPreferredOutput(DeviceChoice d){outputDeviceId=d==null?0:d.id;outputRoute=d==null?"System default":d.name;}
+    public void setPreferredInput(DeviceChoice d){inputDeviceId=d==null?0:d.id;inputRoute=d==null?"System default":d.name;inputCalibrationKey=d==null||d.info==null?"input-unresolved":d.calibrationKey;resolvedInputRoute=d==null||d.info==null?"System default (unresolved)":d.name;applyStoredMicrophoneCalibration();applyStoredOutputCapability();}
+    public void setPreferredOutput(DeviceChoice d){outputDeviceId=d==null?0:d.id;outputRoute=d==null?"System default":d.name;outputCapabilityKey=d==null||d.info==null?"output-unresolved":d.calibrationKey;resolvedOutputRoute=d==null||d.info==null?"System default (unresolved)":d.name;applyStoredOutputCapability();}
     public String getInputRoute(){return inputRoute;} public String getOutputRoute(){return outputRoute;}
     public String getResolvedInputRoute(){return resolvedInputRoute;}
+    public String getResolvedOutputRoute(){return resolvedOutputRoute;}
     public String getInputCalibrationKey(){return inputCalibrationKey;}
+    public String getOutputCapabilityKey(){return outputCapabilityKey;}
     public boolean hasResolvedPhysicalInput(){return !"input-unresolved".equals(inputCalibrationKey);}
+    public boolean hasResolvedPhysicalOutput(){return !"output-unresolved".equals(outputCapabilityKey);}
+    public OutputCapability getOutputCapability(){return outputCapability;}
+    public String getOutputSweepStatus(){return outputSweepStatus;}
     public int getInputDeviceId(){return inputDeviceId;} public int getOutputDeviceId(){return outputDeviceId;}
     public float getInputRms(){return inputRms;} public float getOutputRms(){return outputRms;}
     public boolean isSplMeterEnabled(){return splEnabled.get();}
@@ -188,6 +204,7 @@ public final class AudioEngine {
 
     /** Optional speculative vehicle broadband can be toggled live; narrowband lanes keep running. */
     public synchronized void setVehicleBroadbandEnabled(boolean enabled){
+        if(enabled&&outputCapability!=null&&!outputCapability.supportsBroadband()){enabled=false;safetyStatus="Broadband blocked · measured output band is incomplete";}
         vehicleBroadbandEnabled=enabled;
         VehicleNarrowbandBank bank=vehicleNarrowband;if(bank!=null)bank.setBroadbandEnabled(enabled);
         if(mode!=Mode.VEHICLE||!running.get())return;
@@ -211,7 +228,7 @@ public final class AudioEngine {
         float[] captured=new float[total],captured2=new float[total];
         try{
             AudioRecord r=buildRecord();AudioTrack t=buildTrack();if(r==null||t==null)throw new IllegalStateException("Could not open selected audio route");
-            r.startRecording();resolveInputDevice(r);t.play();t.write(new float[192],0,192,AudioTrack.WRITE_BLOCKING);
+            r.startRecording();resolveInputDevice(r);t.play();t.write(new float[192],0,192,AudioTrack.WRITE_BLOCKING);resolveOutputDevice(t);
             AudioDeviceInfo routed=t.getRoutedDevice();
             if(ProfileStore.PROFILE_HEADPHONES.equals(activeProfile)&&routed!=null&&!isHeadphoneLike(routed.getType()))throw new IllegalStateException("Headphone calibration output is not routed to headphones");
             VolumeSnapshot volumeStart=volumeSnapshot(t);
@@ -236,9 +253,65 @@ public final class AudioEngine {
     private static float[] calibrationProbe(int lead,int probeLen,int total,int seed){float[] probe=new float[total];int lfsr=seed;for(int i=0;i<probeLen;i++){int bit=((lfsr>>0)^(lfsr>>1))&1;lfsr=(lfsr>>1)|(bit<<14);probe[lead+i]=(lfsr&1)==0?-1f:1f;}return probe;}
     private static void captureCalibrationPass(AudioRecord r,AudioTrack t,float[] probe,float[] captured){int block=256;float[] ob=new float[block],ib=new float[block];int pos=0;while(pos<probe.length){int n=Math.min(block,probe.length-pos);System.arraycopy(probe,pos,ob,0,n);t.write(ob,0,n,AudioTrack.WRITE_BLOCKING);int q=r.read(ib,0,n,AudioRecord.READ_BLOCKING);if(q>0)System.arraycopy(ib,0,captured,pos,Math.min(q,n));pos+=n;}}
     private record DelayEstimate(int lag,double quality,double signedCorrelation){}
+    private record SweepPair(Complex positive,Complex negative){}
     private static DelayEstimate estimateDelay(float[] probe,float[] captured,int lead,int total){int maxLag=Math.min(24000,total-lead-4096-1),bestLag=0;double best=0,bestSigned=0,pe=0;for(int i=0;i<4096;i++){double xx=probe[lead+i];pe+=xx*xx;}for(int lag=0;lag<maxLag;lag+=2){double dot=0,re=1e-12;int base=lead+lag;for(int i=0;i<4096;i++){double xx=probe[lead+i],y=captured[base+i];dot+=xx*y;re+=y*y;}double corr=dot/Math.sqrt(pe*re);if(Math.abs(corr)>best){best=Math.abs(corr);bestSigned=corr;bestLag=lag;}}int start=Math.max(0,bestLag-4),end=Math.min(maxLag,bestLag+5);for(int lag=start;lag<=end;lag++){double dot=0,re=1e-12;int base=lead+lag;for(int i=0;i<4096;i++){double xx=probe[lead+i],y=captured[base+i];dot+=xx*y;re+=y*y;}double corr=dot/Math.sqrt(pe*re);if(Math.abs(corr)>best){best=Math.abs(corr);bestSigned=corr;bestLag=lag;}}return new DelayEstimate(bestLag,best,bestSigned);}
     private static float[] fitSecondaryPath(float[] probe,float[] captured,int lead,int probeLen,int total,int lag){int firLen=128;float[] h=new float[firLen],xh=new float[firLen];int xp=0;float mu=0.35f;int nFit=Math.min(probeLen-256,total-lead-lag-256);for(int nn=0;nn<nFit;nn++){float xx=probe[lead+nn];xh[xp]=xx;float yh=0,norm=1e-7f;int p=xp;for(int k=0;k<firLen;k++){yh+=h[k]*xh[p];norm+=xh[p]*xh[p];if(--p<0)p=firLen-1;}float target=captured[lead+lag+nn],err=target-yh,step=mu*err/norm;p=xp;for(int k=0;k<firLen;k++){h[k]+=step*xh[p];if(--p<0)p=firLen-1;}if(++xp==firLen)xp=0;}return h;}
     private void saveCalibrationWavs(float[] probe,float[] response,String suffix){try{String s=storage.timestamp();File a=new File(context.getCacheDir(),"probe-"+s+"-"+suffix+".wav"),b=new File(context.getCacheDir(),"response-"+s+"-"+suffix+".wav");try(WavWriter w=new WavWriter(a,SAMPLE_RATE,1)){w.writeMonoPair(probe,probe,probe.length);}try(WavWriter w=new WavWriter(b,SAMPLE_RATE,1)){w.writeMonoPair(response,response,response.length);}if(storage.isConnected()){storage.copyFileToTree(a,"wav/calibration-probe-"+s+"-"+suffix+".wav","audio/wav");storage.copyFileToTree(b,"wav/calibration-response-"+s+"-"+suffix+".wav","audio/wav");}a.delete();b.delete();}catch(Exception ignored){}}
+
+    /** Two-polarity stepped-sine sweep. Phase reversal rejects a steady ambient tone at the test frequency. */
+    @SuppressLint("MissingPermission")
+    public synchronized OutputSweepResult measureOutputCapability(){
+        if(context.checkSelfPermission(Manifest.permission.RECORD_AUDIO)!=PackageManager.PERMISSION_GRANTED)return new OutputSweepResult(false,null,"Microphone permission is required");
+        if(!storage.isConnected())return new OutputSweepResult(false,null,"Connect Documents/ANC first");
+        stopSplMeter();stop();
+        double[] frequencies={20,25,31.5,40,50,63,80,100,125,160,200};
+        float testAmplitude=0.018f;
+        AudioRecord r=null;AudioTrack t=null;
+        try{
+            r=buildRecord();t=buildTrack();r.startRecording();resolveInputDevice(r);t.play();t.write(new float[192],0,192,AudioTrack.WRITE_BLOCKING);resolveOutputDevice(t);
+            if(!hasResolvedPhysicalInput()||!hasResolvedPhysicalOutput())throw new IllegalStateException("Android did not resolve the physical input/output route");
+            VolumeSnapshot volume=volumeSnapshot(t);
+            long settleMs=Math.max(550L,Math.min(1600L,Math.round((calibration==null?0:calibration.conservativeDelayMs())+400.0)));
+            double[][] response=new double[2][frequencies.length],ambient=new double[2][frequencies.length];
+            for(int pass=0;pass<2;pass++)for(int i=0;i<frequencies.length;i++){
+                outputSweepStatus=String.format(Locale.US,"Output sweep %d/2 · %.1f Hz",pass+1,frequencies[i]);
+                SweepPair pair=measureSweepPair(r,t,frequencies[i],testAmplitude,settleMs);
+                Complex pathSignal=pair.positive().subtract(pair.negative()).multiply(0.5);
+                Complex disturbance=pair.positive().add(pair.negative()).multiply(0.5);
+                response[pass][i]=pathSignal.magnitude();ambient[pass][i]=disturbance.magnitude();
+            }
+            List<OutputCapability.Point> points=new ArrayList<>();
+            for(int i=0;i<frequencies.length;i++){
+                double responseDb0=SpectrumAnalyzer.linearToDb(response[0][i]),responseDb1=SpectrumAnalyzer.linearToDb(response[1][i]);
+                double responseDb=(responseDb0+responseDb1)*0.5;
+                double repeat=Math.abs(responseDb0-responseDb1);
+                double floor=Math.max(1e-9,(ambient[0][i]+ambient[1][i])*0.5);
+                double authority=20.0*Math.log10(Math.max(1e-9,(response[0][i]+response[1][i])*0.5)/floor);
+                boolean supported=Double.isFinite(responseDb)&&responseDb>=-78.0&&repeat<=4.0&&authority>=-12.0;
+                points.add(new OutputCapability.Point(frequencies[i],responseDb,repeat,authority,supported));
+            }
+            OutputCapability capability=new OutputCapability(outputCapabilityKey,resolvedOutputRoute,inputCalibrationKey,resolvedInputRoute,volume.index,volume.max,System.currentTimeMillis(),points);
+            if(!profiles.saveOutputCapability(capability))throw new IllegalStateException("Could not save the output sweep");
+            outputCapability=capability;outputSweepStatus=capability.summary();
+            return new OutputSweepResult(true,capability,"Output capability saved · "+capability.summary());
+        }catch(Exception e){outputSweepStatus="Output sweep failed · "+e.getMessage();return new OutputSweepResult(false,null,outputSweepStatus);}
+        finally{try{if(r!=null){r.stop();r.release();}}catch(Exception ignored){}try{if(t!=null){t.pause();t.flush();t.stop();t.release();}}catch(Exception ignored){}}
+    }
+
+    private static SweepPair measureSweepPair(AudioRecord r,AudioTrack t,double frequency,float amplitude,long settleMs){
+        Complex positive=captureSteadyTone(r,t,frequency,amplitude,settleMs,600);
+        captureSteadyTone(r,t,frequency,0f,250,150);
+        Complex negative=captureSteadyTone(r,t,frequency,-amplitude,settleMs,600);
+        captureSteadyTone(r,t,frequency,0f,250,150);
+        return new SweepPair(positive,negative);
+    }
+
+    private static Complex captureSteadyTone(AudioRecord r,AudioTrack t,double frequency,float amplitude,long settleMs,long measureMs){
+        int block=192,settle=(int)(SAMPLE_RATE*settleMs/1000),measure=(int)(SAMPLE_RATE*measureMs/1000),total=settle+measure;
+        float[] out=new float[block],in=new float[block];double re=0,im=0;long count=0,sample=0;
+        while(sample<total){int n=(int)Math.min(block,total-sample);for(int i=0;i<n;i++)out[i]=(float)(amplitude*Math.cos(2.0*Math.PI*frequency*(sample+i)/SAMPLE_RATE));t.write(out,0,n,AudioTrack.WRITE_BLOCKING);int q=r.read(in,0,n,AudioRecord.READ_BLOCKING);if(q>0)for(int i=0;i<q;i++){long at=sample+i;if(at<settle)continue;double phase=2.0*Math.PI*frequency*at/SAMPLE_RATE;re+=in[i]*Math.cos(phase);im-=in[i]*Math.sin(phase);count++;}sample+=n;}
+        if(count==0)return Complex.ZERO;return new Complex(2.0*re/count,2.0*im/count);
+    }
 
     @SuppressLint("MissingPermission")
     public synchronized boolean startHeadphoneAnc(){if(calibration==null){lastError="No stored headphone calibration";return false;}return startInternal(Mode.HEADPHONES,ProfileStore.PROFILE_HEADPHONES,false,List.of());}
@@ -252,8 +325,12 @@ public final class AudioEngine {
             stopStandaloneSpl();
             mode=requested;activeProfile=profileId;vehicleBroadbandEnabled=broadbandEnabled;safetyStatus="";lastError="None";
             record=buildRecord();track=buildTrack();if(record==null||track==null)throw new IllegalStateException("Could not open selected audio route");
-            clearGraph();record.startRecording();resolveInputDevice(record);track.play();track.write(new float[192],0,192,AudioTrack.WRITE_BLOCKING);
+            clearGraph();record.startRecording();resolveInputDevice(record);track.play();track.write(new float[192],0,192,AudioTrack.WRITE_BLOCKING);resolveOutputDevice(track);
+            validateOutputCapabilityVolume(volumeSnapshot(track));
             AudioDeviceInfo routed=track.getRoutedDevice();
+            if(requested==Mode.VEHICLE&&vehicleBroadbandEnabled&&outputCapability!=null&&!outputCapability.supportsBroadband()){
+                vehicleBroadbandEnabled=false;safetyStatus="Broadband blocked · measured output band is incomplete";
+            }
             if(requested==Mode.HEADPHONES){
                 if(routed==null||!isHeadphoneLike(routed.getType()))throw new IllegalStateException("ANC stopped: output is not routed to headphones");
                 headphoneFx=new HeadphoneFeedforwardFxNlms(calibration.secondaryPath,calibration.delaySamples,calibration.safeOutputCeiling);headphoneFx.setAdaptationRate(calibration.delaySamples>2400?0.012f:0.035f);headphoneFx.setUserOutputScale(antiNoisePercent/100f);
@@ -264,11 +341,12 @@ public final class AudioEngine {
                         calibration.safeOutputCeiling,antiNoisePercent/100f,
                         calibration.minimumCancellationHz,calibration.maximumCancellationHz,
                         vehicleRecipeRouteKey(),profiles.loadCancellationRecipes(profileId),
-                        calibration.conservativeDelayMs(),microphoneCalibration==null?null:microphoneCalibration::correctionAt);
-                vehicleNarrowband.setBroadbandEnabled(broadbandEnabled);
+                        calibration.conservativeDelayMs(),microphoneCalibration==null?null:microphoneCalibration::correctionAt,
+                        outputCapability==null?null:outputCapability::supports);
+                vehicleNarrowband.setBroadbandEnabled(vehicleBroadbandEnabled);
                 vehicleNarrowband.setExternalEvaluationMuted(evaluationOutputMuted);
                 lastVehicleFrequencyRevision=vehicleNarrowband.frequencyRevision();lastVehicleExcluderUpdateMs=System.currentTimeMillis();
-                if(broadbandEnabled){vehicleFx=new FeedbackFxNlms(calibration.secondaryPath,calibration.delaySamples,128,calibration.safeOutputCeiling);configureVehicleFx(vehicleFx);vehicleFx.setEvaluationMuted(evaluationOutputMuted);vehicleFx.setExcludedFrequencies(vehicleNarrowband.frequenciesHz());}else vehicleFx=null;
+                if(vehicleBroadbandEnabled){vehicleFx=new FeedbackFxNlms(calibration.secondaryPath,calibration.delaySamples,128,calibration.safeOutputCeiling);configureVehicleFx(vehicleFx);vehicleFx.setEvaluationMuted(evaluationOutputMuted);vehicleFx.setExcludedFrequencies(vehicleNarrowband.frequenciesHz());}else vehicleFx=null;
             }
             expectedOutputRouteId=routed==null?0:routed.getId();routeMissingBlocks=0;
             lastDiagnosticsMs=0;diagnosticLaneState="";initializeVolumeCompensation();
@@ -390,6 +468,16 @@ public final class AudioEngine {
         resolvedInputRoute=typeName(routed)+" · "+routed.getProductName();
         inputCalibrationKey=physicalDeviceKey(routed);
         applyStoredMicrophoneCalibration();
+        applyStoredOutputCapability();
+    }
+
+    private void resolveOutputDevice(AudioTrack source){
+        AudioDeviceInfo routed=source==null?null:source.getRoutedDevice();
+        if(routed==null&&outputDeviceId!=0)routed=findOutputDevice(outputDeviceId);
+        if(routed==null)return;
+        resolvedOutputRoute=typeName(routed)+" · "+routed.getProductName();
+        outputCapabilityKey=physicalDeviceKey(routed);
+        applyStoredOutputCapability();
     }
 
     private void applyStoredMicrophoneCalibration(){
@@ -398,12 +486,28 @@ public final class AudioEngine {
         splMeter.setCalibrationOffset(calibrated?c.provisionalSplOffsetDb():0.0,calibrated);
     }
 
+    private void applyStoredOutputCapability(){
+        OutputCapability c=profiles.loadOutputCapability(outputCapabilityKey);
+        outputCapability=c!=null&&c.routeMatches(outputCapabilityKey,inputCalibrationKey)?c:null;
+        if(c==null)outputSweepStatus="No output capability sweep for "+resolvedOutputRoute;
+        else if(outputCapability==null)outputSweepStatus="Stored sweep used a different microphone";
+        else outputSweepStatus=outputCapability.summary();
+    }
+
+    private void validateOutputCapabilityVolume(VolumeSnapshot current){
+        if(outputCapability==null||outputCapability.volumeMatches(current.index,current.max))return;
+        outputCapability=null;
+        outputSweepStatus="Stored sweep used a different media-volume setting";
+        safetyStatus="Output sweep required at the current media volume";
+    }
+
     private static String physicalDeviceKey(AudioDeviceInfo d){
-        if(d==null)return "input-unresolved";
+        if(d==null)return "audio-unresolved";
         String product=String.valueOf(d.getProductName()).trim().toLowerCase(Locale.US).replaceAll("\\s+"," ");
         String address="";try{address=d.getAddress();}catch(Exception ignored){}
         if(address==null)address="";
-        return "audio-input|type="+d.getType()+"|product="+product+"|address="+address.trim().toLowerCase(Locale.US);
+        String role=d.isSource()?"input":d.isSink()?"output":"device";
+        return "audio-"+role+"|type="+d.getType()+"|product="+product+"|address="+address.trim().toLowerCase(Locale.US);
     }
 
     @SuppressLint("MissingPermission")

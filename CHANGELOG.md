@@ -4,6 +4,19 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.9.7-recovery] — 2026-09-10
+
+### Added
+- Add a two-pass 20–200 Hz output-to-microphone capability sweep stored against the physical output, physical microphone and media-volume setting.
+- Keep unsupported frequencies visible for monitoring while preventing narrowband emission, and block broadband mode when the measured route has inadequate coverage.
+
+### Changed
+- Make the two-step microphone benchmark survive input switching and app recreation for ten minutes, start independent SPL capture automatically, and clearly distinguish the calibrated reference from the phone microphone.
+- Reject a stored output sweep when the microphone or media-volume setting differs materially from the measured route.
+
+### Analysis
+- Reviewed `session-20260910-092219.wav` and `session-20260910-092632.wav`. Both contain substantial digital anti-noise commands, but show essentially no repeatable authority at the dominant approximately 35 Hz line through the phone speaker. Portions near 120 Hz moved by several decibels, confirming that target eligibility must be based on measured output bandwidth rather than requested controller gain.
+
 ## [0.5.9.6-recovery] — 2026-09-10
 
 ### Changed

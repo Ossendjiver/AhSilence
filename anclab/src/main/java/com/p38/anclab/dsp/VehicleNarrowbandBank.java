@@ -9,6 +9,7 @@ import java.util.Comparator;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Locale;
+import java.util.function.DoublePredicate;
 
 /**
  * Coherent narrowband vehicle cancellation bank with live GPS/OBD order tracking and a
@@ -76,6 +77,7 @@ public final class VehicleNarrowbandBank {
     private final double cancellationMaximumHz;
     private final double outputLatencyMs;
     private final FrequencyResponse microphoneResponse;
+    private final DoublePredicate outputCapability;
 
     private int ringPos=0,ringCount=0,decimator=0,sinceAnalysis=0,discoveryAnalysisCounter=0;
     private long totalAnalysisSamples=0;
@@ -111,7 +113,7 @@ public final class VehicleNarrowbandBank {
                                  String routeKey,List<VehicleCancellationRecipe> recipes,
                                  double outputLatencyMs){
         this(models,telemetry,safeOutputCeiling,userScale,cancellationMinimumHz,cancellationMaximumHz,
-                routeKey,recipes,outputLatencyMs,FrequencyResponse.FLAT);
+                routeKey,recipes,outputLatencyMs,FrequencyResponse.FLAT,null);
     }
 
     public VehicleNarrowbandBank(List<MechanicalFrequency> models,VehicleTelemetryRuntime telemetry,
@@ -119,6 +121,16 @@ public final class VehicleNarrowbandBank {
                                  double cancellationMinimumHz,double cancellationMaximumHz,
                                  String routeKey,List<VehicleCancellationRecipe> recipes,
                                  double outputLatencyMs,FrequencyResponse microphoneResponse){
+        this(models,telemetry,safeOutputCeiling,userScale,cancellationMinimumHz,cancellationMaximumHz,
+                routeKey,recipes,outputLatencyMs,microphoneResponse,null);
+    }
+
+    public VehicleNarrowbandBank(List<MechanicalFrequency> models,VehicleTelemetryRuntime telemetry,
+                                 float safeOutputCeiling,float userScale,
+                                 double cancellationMinimumHz,double cancellationMaximumHz,
+                                 String routeKey,List<VehicleCancellationRecipe> recipes,
+                                 double outputLatencyMs,FrequencyResponse microphoneResponse,
+                                 DoublePredicate outputCapability){
         this.telemetry=telemetry;
         totalCeiling=clamp(Math.abs(safeOutputCeiling),0.005f,0.15f);
         this.userScale=clamp(userScale,0f,1f);
@@ -129,6 +141,7 @@ public final class VehicleNarrowbandBank {
         this.routeKey=routeKey==null?"":routeKey;
         this.outputLatencyMs=Double.isFinite(outputLatencyMs)?Math.max(0.0,outputLatencyMs):0.0;
         this.microphoneResponse=microphoneResponse==null?FrequencyResponse.FLAT:microphoneResponse;
+        this.outputCapability=outputCapability;
         recipeBook=new VehicleRecipeBook(recipes);
         rebuild(models,System.currentTimeMillis());
     }
@@ -256,7 +269,7 @@ public final class VehicleNarrowbandBank {
             double predicted=telemetry==null?Double.NaN:telemetry.predictedHz(l.model);
             boolean valid=Double.isFinite(predicted)&&predicted>=8.0&&predicted<=200.0;
             l.predictedFrequencyHz=predicted;l.available=valid;l.suppressed=false;
-            l.cancellable=valid&&FrequencyLanePolicy.cancellable(predicted,cancellationMinimumHz,cancellationMaximumHz);
+            l.cancellable=valid&&FrequencyLanePolicy.cancellable(predicted,cancellationMinimumHz,cancellationMaximumHz)&&outputSupports(predicted);
         }
         for(int i=0;i<lanes.length;i++){
             Lane lane=lanes[i];if(!lane.available||!lane.cancellable)continue;
@@ -378,7 +391,7 @@ public final class VehicleNarrowbandBank {
                 DiscoveredLane replace=null;
                 int controllerSlots=discoveredControllerSlotCount();
                 boolean candidateCancellable=FrequencyLanePolicy.cancellable(candidate.frequencyHz(),
-                        cancellationMinimumHz,cancellationMaximumHz);
+                        cancellationMinimumHz,cancellationMaximumHz)&&outputSupports(candidate.frequencyHz());
                 if(candidateCancellable&&controllerSlots>=fallbackLaneLimit())replace=findReplaceableLane(candidate,now);
                 if(candidateCancellable&&controllerSlots>=fallbackLaneLimit()&&replace==null)continue;
                 if(replace!=null){replace.controller.stop();discovered.remove(replace);}
@@ -387,7 +400,7 @@ public final class VehicleNarrowbandBank {
                 lane.referenceEpoch=totalAnalysisSamples;lane.referencePhase=lane.oscillator.phase;
                 lane.tracker.reset(lane.currentFrequencyHz,now);
                 lane.cancellable=FrequencyLanePolicy.cancellable(lane.currentFrequencyHz,
-                        cancellationMinimumHz,cancellationMaximumHz);
+                        cancellationMinimumHz,cancellationMaximumHz)&&outputSupports(lane.currentFrequencyHz);
                 discovered.add(lane);
                 redistributeLimits();
                 if(lane.cancellable)startDiscoveredController(lane,now);else lane.controller.stop();
@@ -447,6 +460,8 @@ public final class VehicleNarrowbandBank {
     private int fallbackLaneLimit(){
         return broadbandEnabled?MAX_DISCOVERED_LANES_BROADBAND:MAX_DISCOVERED_LANES_NARROWBAND_ONLY;
     }
+
+    private boolean outputSupports(double frequencyHz){return outputCapability==null||outputCapability.test(frequencyHz);}
 
     /** Monitor-only discoveries stay visible but do not consume cancellation-controller capacity. */
     private int discoveredControllerSlotCount(){

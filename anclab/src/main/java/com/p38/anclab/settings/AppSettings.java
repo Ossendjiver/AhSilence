@@ -26,5 +26,10 @@ public final class AppSettings {
     public String outputRoute(){return prefs.getString("output_route","");}
     public void setInputRoute(String value){prefs.edit().putString("input_route",clean(value)).apply();}
     public void setOutputRoute(String value){prefs.edit().putString("output_route",clean(value)).apply();}
+    public double benchmarkReferenceSpl(){return Double.longBitsToDouble(prefs.getLong("benchmark_reference_spl",Double.doubleToLongBits(Double.NaN)));}
+    public String benchmarkReferenceKey(){return prefs.getString("benchmark_reference_key","");}
+    public String benchmarkReferenceRoute(){return prefs.getString("benchmark_reference_route","");}
+    public long benchmarkReferenceUtcMs(){return prefs.getLong("benchmark_reference_utc",0L);}
+    public void setBenchmarkReference(double spl,String key,String route){prefs.edit().putLong("benchmark_reference_spl",Double.doubleToLongBits(spl)).putString("benchmark_reference_key",clean(key)).putString("benchmark_reference_route",clean(route)).putLong("benchmark_reference_utc",System.currentTimeMillis()).apply();}
     private static String clean(String value){return value==null?"":value.trim();}
 }

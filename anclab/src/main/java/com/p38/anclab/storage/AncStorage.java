@@ -83,6 +83,7 @@ public final class AncStorage {
         ensureDirectory("profiles/p38");
         ensureDirectory("profiles/e46");
         ensureDirectory("profiles/microphones");
+        ensureDirectory("profiles/outputs");
         ensureDirectory("calibration");
         ensureDirectory("logs");
         ensureDirectory("wav");

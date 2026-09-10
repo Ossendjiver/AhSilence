@@ -30,6 +30,7 @@ public final class ProfileStore {
         if (!storage.exists("profiles/e46/profile.json")) storage.writeJson("profiles/e46/profile.json", defaultE46().toString());
         if (!storage.exists("profiles/headphones/profile.json")) storage.writeJson("profiles/headphones/profile.json", defaultHeadphones().toString());
         if (!storage.exists("profiles/microphones/index.json")) storage.writeJson("profiles/microphones/index.json",new JSONObject().toString());
+        if (!storage.exists("profiles/outputs/index.json")) storage.writeJson("profiles/outputs/index.json",new JSONObject().toString());
         if (!storage.exists("profiles/mechanical_frequencies.json")) storage.writeJson("profiles/mechanical_frequencies.json", defaultP38Mechanical().toString());
         if (!storage.exists("profiles/latency_profiles.jsonl")) storage.writeText("profiles/latency_profiles.jsonl", "");
         if (!storage.exists("recipes/cancellation_recipes.jsonl")) storage.writeText("recipes/cancellation_recipes.jsonl", "");
@@ -168,6 +169,15 @@ public final class ProfileStore {
     public boolean saveMicCalibration(String routeName,MicCalibration calibration,String originalFile,boolean makeDefault){return calibration.hasFrequencyResponse()?saveMicResponseCalibration(routeName,routeName,calibration,originalFile,makeDefault):saveMicSplCalibration(routeName,routeName,calibration.provisionalSplOffsetDb());}
     private static void putMicIdentity(JSONObject o,String deviceKey,String routeName){try{o.put("deviceKey",deviceKey==null?"":deviceKey);o.put("routeName",routeName==null?"":routeName);o.put("storedUtcMs",System.currentTimeMillis());}catch(Exception ignored){}}
 
+    public boolean saveOutputCapability(OutputCapability capability){
+        if(!storage.isConnected()||capability==null||capability.outputDeviceKey.isBlank())return false;
+        return storage.writeJson("profiles/outputs/"+deviceFileKey(capability.outputDeviceKey)+".json",capability.toJson().toString());
+    }
+    public OutputCapability loadOutputCapability(String outputDeviceKey){
+        if(outputDeviceKey==null||outputDeviceKey.isBlank()||"output-unresolved".equals(outputDeviceKey))return null;
+        return OutputCapability.fromJson(storage.readText("profiles/outputs/"+deviceFileKey(outputDeviceKey)+".json"));
+    }
+
     /** Current static anchors, retained for compatibility. Dynamic runtime uses loadMechanicalFrequencies(). */
     public double[] loadPredictableFrequencies(String profileId) {
         List<MechanicalFrequency> models=loadMechanicalFrequencies(profileId);double[] tmp=new double[models.size()];int n=0;
@@ -179,7 +189,8 @@ public final class ProfileStore {
     private String normalizeProfile(String id) {if (PROFILE_P38.equalsIgnoreCase(id)) return PROFILE_P38;if (PROFILE_E46.equalsIgnoreCase(id)) return PROFILE_E46;return PROFILE_HEADPHONES;}
     private static String clean(String value,int max){String v=value==null?"":value.trim().replaceAll("\\s+"," ");return v.length()>max?v.substring(0,max).trim():v;}
     private static String cleanId(String id){String v=id==null?"":id.toLowerCase().replaceAll("[^a-z0-9_-]","-");return v.isEmpty()?"model-"+System.currentTimeMillis():v;}
-    private static String micKey(String route){String r=route==null?"system-default":route.trim().toLowerCase();String prefix=r.replaceAll("[^a-z0-9]+","-").replaceAll("^-|-$","");if(prefix.length()>36)prefix=prefix.substring(0,36);return (prefix.isEmpty()?"microphone":prefix)+"-"+Integer.toHexString(r.hashCode());}
+    private static String micKey(String route){return deviceFileKey(route);}
+    private static String deviceFileKey(String route){String r=route==null?"system-default":route.trim().toLowerCase();String prefix=r.replaceAll("[^a-z0-9]+","-").replaceAll("^-|-$","");if(prefix.length()>36)prefix=prefix.substring(0,36);return (prefix.isEmpty()?"audio-device":prefix)+"-"+Integer.toHexString(r.hashCode());}
 
     private JSONObject defaultP38() {JSONObject o=new JSONObject();try {o.put("id",PROFILE_P38);o.put("name","P38 car");o.put("description","P38 vehicle ANC with live speed/RPM mechanical-order learning");o.put("algorithm","telemetry-tracked multi-lane narrowband + optional measured-error broadband-feedback-fxnlms");o.put("monitorLogEnabled",true);o.put("mechanicalFrequenciesFile","mechanical_frequencies.json");o.put("mechanicalLearningFile","mechanical_learning.json");o.put("baseTuneRevision",P38_BASE_TUNE_REVISION);o.put("recipeFile","../../recipes/p38.jsonl");o.put("latencyHistoryFile","latency_profiles.jsonl");o.put("speculativeBroadbandDefault",false);o.put("broadbandExcludesPredictableLanes",true);} catch (Exception ignored) { }return o;}
     private JSONObject defaultE46() {JSONObject o=new JSONObject();try {o.put("id",PROFILE_E46);o.put("name","E46 car");o.put("description","Independent vehicle profile; mechanical-frequency list starts empty and learns after models are added");o.put("algorithm","telemetry-tracked multi-lane narrowband + optional measured-error broadband-feedback-fxnlms");o.put("monitorLogEnabled",true);o.put("mechanicalFrequenciesFile","mechanical_frequencies.json");o.put("mechanicalLearningFile","mechanical_learning.json");o.put("recipeFile","../../recipes/e46.jsonl");o.put("latencyHistoryFile","latency_profiles.jsonl");o.put("speculativeBroadbandDefault",false);o.put("broadbandExcludesPredictableLanes",true);} catch (Exception ignored) { }return o;}
